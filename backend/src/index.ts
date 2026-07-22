@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
+import fileUploadOcrRoutes from './features/file-upload-ocr/file-upload-ocr.routes';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
@@ -11,14 +12,7 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
 
-app.post('/api/query', (req: Request, res: Response) => {
-  const { message } = req.body ?? {};
-  res.json({ reply: `Received: ${message ?? ''}` });
-});
-
-app.post('/api/upload', (req: Request, res: Response) => {
-  res.json({ received: true });
-});
+app.use('/api/file-upload-ocr', fileUploadOcrRoutes);
 
 app.listen(PORT, () => {
   console.log(`Backend listening on http://localhost:${PORT}`);
