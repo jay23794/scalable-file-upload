@@ -1,0 +1,29 @@
+<mat-card class="chat-card">
+  <mat-card-header>
+    <mat-card-title>Real-time Chat</mat-card-title>
+    <mat-card-subtitle>Query and process your data</mat-card-subtitle>
+  </mat-card-header>
+
+  <mat-card-content>
+    <div class="messages" #scrollContainer>
+      @for (msg of messages(); track msg.id) {
+        <div class="message" [class.me]="msg.author === 'me'" [class.bot]="msg.author === 'bot'">
+          <div class="bubble">
+            <div class="text">{{ msg.text }}</div>
+            <div class="time">{{ msg.timestamp | date:'shortTime' }}</div>
+          </div>
+        </div>
+      }
+    </div>
+
+    <form class="composer" (ngSubmit)="send()">
+      <mat-form-field appearance="outline" class="composer-field">
+        <mat-label>Type a message</mat-label>
+        <input matInput [(ngModel)]="draft" name="draft" autocomplete="off" />
+      </mat-form-field>
+      <button mat-fab color="primary" type="submit" [disabled]="!draft.trim()">
+        <mat-icon>send</mat-icon>
+      </button>
+    </form>
+  </mat-card-content>
+</mat-card>

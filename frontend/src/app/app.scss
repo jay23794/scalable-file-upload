@@ -1,0 +1,38 @@
+.app-container {
+  height: 100vh;
+}
+
+.app-sidenav {
+  width: 260px;
+  border-right: 1px solid var(--mat-sys-outline-variant);
+}
+
+.sidenav-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  .sidenav-title {
+    font-size: 18px;
+    font-weight: 500;
+  }
+}
+
+.app-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 12px;
+}
+
+.app-content {
+  padding: 16px;
+  min-height: calc(100vh - 64px);
+  background: var(--mat-sys-surface);
+}
+
+.active-link {
+  background: var(--mat-sys-secondary-container);
+  color: var(--mat-sys-on-secondary-container);
+}
