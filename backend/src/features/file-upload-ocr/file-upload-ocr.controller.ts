@@ -1,14 +1,14 @@
 import { Request, Response } from 'express';
 import { fileUploadOcrService } from '../../infra/container';
+import { FileUploadSchema } from './file-upload-ocr.schema';
 
 export const upload = (req: Request, res: Response) => {
-  const { filename, size, mimeType } = req.body ?? {};
-
-  if (!filename || typeof size !== 'number' || !mimeType) {
-    return res.status(400).json({ error: 'filename, size, and mimeType are required' });
+  const parsed = FileUploadSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ errors: parsed.error.flatten() });
   }
 
-  const record = fileUploadOcrService.registerUpload({ filename, size, mimeType });
+  const record = fileUploadOcrService.registerUpload(parsed.data);
   return res.status(201).json(record);
 };
 

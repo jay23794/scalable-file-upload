@@ -1,16 +1,11 @@
 import { randomUUID } from 'crypto';
 import { FileUploadOcrRepository, UploadRecord } from './file-upload-ocr.repository';
-
-export interface UploadInput {
-  filename: string;
-  size: number;
-  mimeType: string;
-}
+import { FileUploadInput } from './file-upload-ocr.schema';
 
 export class FileUploadOcrService {
   constructor(private _repo: FileUploadOcrRepository) {}
 
-  registerUpload(input: UploadInput): UploadRecord {
+  registerUpload(input: FileUploadInput): UploadRecord {
     return this._repo.create({
       id: randomUUID(),
       filename: input.filename,
