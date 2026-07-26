@@ -1,34 +1,56 @@
 import { Request, Response } from 'express';
 import { fileUploadOcrService } from '../../infra/container';
-import { FileUploadSchema } from './file-upload-ocr.schema';
+import { CompleteUploadSchema, PresignUploadSchema } from './file-upload-ocr.schema';
+import { successResponse } from '../../utils/apiResponse';
 
-export const upload = (req: Request, res: Response) => {
-  
-  const parsed = FileUploadSchema.safeParse(req.body);
+export const presign = async (req: Request, res: Response) => {
+  const parsed = PresignUploadSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ errors: parsed.error.flatten() });
+    return res.status(400).json({ success: false, errors: parsed.error.flatten() });
   }
 
-  const record = fileUploadOcrService.registerUpload(parsed.data);
-  return res.status(201).json(record);
+  try {
+    const data = await fileUploadOcrService.presignUpload(parsed.data);
+    return res.status(201).json(successResponse(data, 'Signed upload URL created'));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
+  }
+};
+
+export const complete = (req: Request, res: Response) => {
+  const parsed = CompleteUploadSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, errors: parsed.error.flatten() });
+  }
+
+  const record = fileUploadOcrService.completeUpload(parsed.data);
+  return res.status(201).json(successResponse(record, 'Upload registered'));
 };
 
 export const list = (_req: Request, res: Response) => {
-  res.json(fileUploadOcrService.listUploads());
+  return res.json(successResponse(fileUploadOcrService.listUploads()));
 };
 
-export const getById = (req: Request, res: Response) => {
-  const record = fileUploadOcrService.getUpload(req.params.id);
-  if (!record) {
-    return res.status(404).json({ error: 'Upload not found' });
+export const getById = async (req: Request, res: Response) => {
+  try {
+    const record = await fileUploadOcrService.getUpload(req.params.id);
+    if (!record) {
+      return res.status(404).json({ success: false, error: 'Upload not found' });
+    }
+    return res.json(successResponse(record));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
   }
-  return res.json(record);
 };
 
-export const remove = (req: Request, res: Response) => {
-  const ok = fileUploadOcrService.removeUpload(req.params.id);
-  if (!ok) {
-    return res.status(404).json({ error: 'Upload not found' });
+export const remove = async (req: Request, res: Response) => {
+  try {
+    const ok = await fileUploadOcrService.removeUpload(req.params.id);
+    if (!ok) {
+      return res.status(404).json({ success: false, error: 'Upload not found' });
+    }
+    return res.status(204).send();
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
   }
-  return res.status(204).send();
 };

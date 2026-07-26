@@ -1,13 +1,30 @@
 import { randomUUID } from 'crypto';
 import { FileUploadOcrRepository, UploadRecord } from './file-upload-ocr.repository';
-import { FileUploadInput } from './file-upload-ocr.schema';
+import { CompleteUploadInput, PresignUploadInput } from './file-upload-ocr.schema';
+import { PresignedUpload, SupabaseStorageService } from '../../infra/storage';
+
+const sanitizeFilename = (name: string): string =>
+  name.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_');
+
+export interface UploadRecordWithDownload extends UploadRecord {
+  downloadUrl: string;
+}
 
 export class FileUploadOcrService {
-  constructor(private _repo: FileUploadOcrRepository) {}
+  constructor(
+    private _repo: FileUploadOcrRepository,
+    private _storage: SupabaseStorageService,
+  ) {}
 
-  registerUpload(input: FileUploadInput): UploadRecord {
+  async presignUpload(input: PresignUploadInput): Promise<PresignedUpload> {
+    const path = `${randomUUID()}/${sanitizeFilename(input.filename)}`;
+    return this._storage.createPresignedUpload(path);
+  }
+
+  completeUpload(input: CompleteUploadInput): UploadRecord {
     return this._repo.create({
       id: randomUUID(),
+      path: input.path,
       filename: input.filename,
       size: input.size,
       mimeType: input.mimeType,
@@ -15,15 +32,21 @@ export class FileUploadOcrService {
     });
   }
 
-  getUpload(id: string): UploadRecord | undefined {
-    return this._repo.findById(id);
+  async getUpload(id: string): Promise<UploadRecordWithDownload | undefined> {
+    const record = this._repo.findById(id);
+    if (!record) return undefined;
+    const downloadUrl = await this._storage.createSignedDownloadUrl(record.path);
+    return { ...record, downloadUrl };
   }
 
   listUploads(): UploadRecord[] {
     return this._repo.list();
   }
 
-  removeUpload(id: string): boolean {
+  async removeUpload(id: string): Promise<boolean> {
+    const record = this._repo.findById(id);
+    if (!record) return false;
+    await this._storage.remove(record.path);
     return this._repo.delete(id);
   }
 }

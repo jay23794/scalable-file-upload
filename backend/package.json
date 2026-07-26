@@ -9,7 +9,9 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.8",
     "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "mongoose": "^9.8.0",
     "zod": "^4.4.3"
