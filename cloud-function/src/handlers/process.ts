@@ -23,7 +23,7 @@ export async function runPipeline(job: PipelineJob): Promise<StoredMetadata> {
 
     const meta = await storeMetadata(ctx);
 
-    await notifyStatus({
+    await notifyStatus({ 
       jobId: job.jobId,
       uploadId: job.uploadId,
       status: 'completed',

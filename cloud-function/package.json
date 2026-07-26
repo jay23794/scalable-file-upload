@@ -9,8 +9,10 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
   },
   "dependencies": {
+    "bullmq": "^5.81.2",
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
+    "ioredis": "^5.11.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
