@@ -17,14 +17,18 @@ export const presign = async (req: Request, res: Response) => {
   }
 };
 
-export const complete = (req: Request, res: Response) => {
+export const complete = async (req: Request, res: Response) => {
   const parsed = CompleteUploadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, errors: parsed.error.flatten() });
   }
 
-  const record = fileUploadOcrService.completeUpload(parsed.data);
-  return res.status(201).json(successResponse(record, 'Upload registered'));
+  try {
+    const record = await fileUploadOcrService.completeUpload(parsed.data);
+    return res.status(201).json(successResponse(record, 'Upload registered'));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
+  }
 };
 
 export const list = (_req: Request, res: Response) => {

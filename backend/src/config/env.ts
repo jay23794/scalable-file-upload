@@ -17,4 +17,10 @@ export const env = {
   signedUrl: {
     downloadTtlSeconds: 60 * 10,
   },
+  redis: {
+    url: process.env.REDIS_URL ?? 'redis://localhost:6379',
+  },
+  ocrQueue: {
+    name: process.env.OCR_QUEUE_NAME ?? 'ocr-queue',
+  },
 };
