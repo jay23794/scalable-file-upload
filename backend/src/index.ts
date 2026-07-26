@@ -12,7 +12,7 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
 
-app.use('/api/file-upload-ocr', fileUploadOcrRoutes);
+app.use('/api/v1/file-upload-ocr', fileUploadOcrRoutes);
 
 app.listen(PORT, () => {
   console.log(`Backend listening on http://localhost:${PORT}`);
