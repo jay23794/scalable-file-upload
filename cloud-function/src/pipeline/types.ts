@@ -1,3 +1,10 @@
+export interface OcrJobData {
+  uploadId: string;
+  storagePath: string;
+  filename: string;
+  mimeType: string;
+}
+
 export interface PipelineJob {
   jobId: string;
   uploadId: string;
