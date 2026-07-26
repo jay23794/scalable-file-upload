@@ -18,3 +18,21 @@
     gap: 8px;
   }
 }
+
+.upload-row {
+  mat-progress-bar {
+    margin-top: 4px;
+  }
+}
+
+.error {
+  color: var(--mat-sys-error);
+}
+
+.muted {
+  color: var(--mat-sys-outline);
+}
+
+.refresh-btn {
+  float: right;
+}

@@ -1,7 +1,7 @@
 <mat-card class="file-upload-card">
   <mat-card-header>
     <mat-card-title>File Upload</mat-card-title>
-    <mat-card-subtitle>Select files to upload</mat-card-subtitle>
+    <mat-card-subtitle>Files upload directly to storage via signed URL</mat-card-subtitle>
   </mat-card-header>
 
   <mat-card-content>
@@ -19,20 +19,73 @@
       </button>
     </div>
 
-    @if (files.length > 0) {
+    @if (items.length > 0) {
       <mat-list>
-        <div mat-subheader>Selected Files</div>
-        @for (file of files; track file.name; let i = $index) {
-          <mat-list-item>
+        <div mat-subheader>In Progress</div>
+        @for (item of items; track item.clientId) {
+          <mat-list-item class="upload-row">
             <mat-icon matListItemIcon>insert_drive_file</mat-icon>
-            <div matListItemTitle>{{ file.name }}</div>
-            <div matListItemLine>{{ (file.size / 1024).toFixed(2) }} KB</div>
-            <button mat-icon-button matListItemMeta (click)="removeFile(i)">
+            <div matListItemTitle>{{ item.file.name }}</div>
+            <div matListItemLine>
+              {{ formatSize(item.file.size) }}
+              @if (item.status === 'error') {
+                <span class="error"> — {{ item.error }}</span>
+              }
+            </div>
+            <div matListItemLine>
+              <mat-progress-bar
+                [mode]="item.status === 'uploading' && item.progress === 0 ? 'indeterminate' : 'determinate'"
+                [value]="item.progress"
+                [color]="item.status === 'error' ? 'warn' : 'primary'"
+              ></mat-progress-bar>
+            </div>
+            <button mat-icon-button matListItemMeta (click)="removeItem(item.clientId)">
               <mat-icon>close</mat-icon>
             </button>
           </mat-list-item>
         }
       </mat-list>
+
+      <mat-divider></mat-divider>
     }
+
+    <mat-list>
+      <div mat-subheader>
+        Uploaded Files
+        <button
+          mat-icon-button
+          class="refresh-btn"
+          (click)="refreshList()"
+          [disabled]="listLoading"
+          aria-label="Refresh"
+        >
+          <mat-icon>refresh</mat-icon>
+        </button>
+      </div>
+
+      @if (uploaded.length === 0 && !listLoading) {
+        <mat-list-item>
+          <div matListItemTitle class="muted">No files uploaded yet.</div>
+        </mat-list-item>
+      }
+
+      @for (record of uploaded; track record.id) {
+        <mat-list-item>
+          <mat-icon matListItemIcon>description</mat-icon>
+          <div matListItemTitle>{{ record.filename }}</div>
+          <div matListItemLine>
+            {{ formatSize(record.size) }} — {{ record.mimeType }}
+          </div>
+          <button
+            mat-icon-button
+            matListItemMeta
+            (click)="openDownload(record)"
+            aria-label="Open download"
+          >
+            <mat-icon>download</mat-icon>
+          </button>
+        </mat-list-item>
+      }
+    </mat-list>
   </mat-card-content>
 </mat-card>
