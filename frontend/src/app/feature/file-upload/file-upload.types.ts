@@ -1,4 +1,18 @@
-export type UploadStatus = 'pending' | 'uploading' | 'completed' | 'error';
+export type UploadStatus =
+  | 'pending'
+  | 'uploading'
+  | 'processing'
+  | 'completed'
+  | 'error';
+
+export type PipelineStep =
+  | 'download'
+  | 'detect'
+  | 'ocr'
+  | 'clean'
+  | 'chunk'
+  | 'ml'
+  | 'store';
 
 export interface UploadItem {
   clientId: string;
@@ -7,6 +21,8 @@ export interface UploadItem {
   status: UploadStatus;
   error?: string;
   recordId?: string;
+  pipelineStep?: PipelineStep;
+  pipelinePct?: number;
 }
 
 export interface PresignRequest {

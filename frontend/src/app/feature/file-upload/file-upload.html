@@ -28,14 +28,25 @@
             <div matListItemTitle>{{ item.file.name }}</div>
             <div matListItemLine>
               {{ formatSize(item.file.size) }}
+              @if (item.status === 'processing') {
+                <span> — {{ stepLabel(item.pipelineStep) }} ({{ item.pipelinePct ?? 0 }}%)</span>
+              }
+              @if (item.status === 'completed') {
+                <span> — Completed</span>
+              }
               @if (item.status === 'error') {
                 <span class="error"> — {{ item.error }}</span>
               }
             </div>
             <div matListItemLine>
               <mat-progress-bar
-                [mode]="item.status === 'uploading' && item.progress === 0 ? 'indeterminate' : 'determinate'"
-                [value]="item.progress"
+                [mode]="
+                  (item.status === 'uploading' && item.progress === 0) ||
+                  (item.status === 'processing' && (item.pipelinePct ?? 0) === 0)
+                    ? 'indeterminate'
+                    : 'determinate'
+                "
+                [value]="item.status === 'processing' ? (item.pipelinePct ?? 0) : item.progress"
                 [color]="item.status === 'error' ? 'warn' : 'primary'"
               ></mat-progress-bar>
             </div>

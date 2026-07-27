@@ -1,4 +1,10 @@
-import { ChangeDetectorRef, Component, OnInit, inject } from '@angular/core';
+import {
+  ChangeDetectorRef,
+  Component,
+  OnDestroy,
+  OnInit,
+  inject,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpEventType } from '@angular/common/http';
 import { MatCardModule } from '@angular/material/card';
@@ -7,8 +13,10 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatDividerModule } from '@angular/material/divider';
+import { Subscription } from 'rxjs';
 import { FileUploadService } from './file-upload.service';
-import { UploadItem, UploadRecord } from './file-upload.types';
+import { PipelineStep, UploadItem, UploadRecord } from './file-upload.types';
+import { SocketService } from '../../core/socket.service';
 
 let nextClientId = 0;
 const makeClientId = () => `u_${Date.now()}_${++nextClientId}`;
@@ -28,16 +36,45 @@ const makeClientId = () => `u_${Date.now()}_${++nextClientId}`;
   templateUrl: './file-upload.html',
   styleUrl: './file-upload.scss',
 })
-export class FileUpload implements OnInit {
+export class FileUpload implements OnInit, OnDestroy {
   private api = inject(FileUploadService);
+  private socket = inject(SocketService);
   private cdr = inject(ChangeDetectorRef);
 
   items: UploadItem[] = [];
   uploaded: UploadRecord[] = [];
   listLoading = false;
 
+  private socketSubs = new Map<string, Subscription>();
+
   ngOnInit(): void {
     this.refreshList();
+  }
+
+  ngOnDestroy(): void {
+    this.socketSubs.forEach((sub) => sub.unsubscribe());
+    this.socketSubs.clear();
+  }
+
+  stepLabel(step?: PipelineStep): string {
+    switch (step) {
+      case 'download':
+        return 'Downloading';
+      case 'detect':
+        return 'Detecting type';
+      case 'ocr':
+        return 'Extracting text';
+      case 'clean':
+        return 'Cleaning';
+      case 'chunk':
+        return 'Chunking';
+      case 'ml':
+        return 'Embedding';
+      case 'store':
+        return 'Storing';
+      default:
+        return 'Processing';
+    }
   }
 
   onFileSelected(event: Event) {
@@ -57,6 +94,8 @@ export class FileUpload implements OnInit {
   }
 
   removeItem(clientId: string) {
+    this.socketSubs.get(clientId)?.unsubscribe();
+    this.socketSubs.delete(clientId);
     this.items = this.items.filter((it) => it.clientId !== clientId);
   }
 
@@ -151,11 +190,14 @@ export class FileUpload implements OnInit {
       })
       .subscribe({
         next: (res) => {
+          const uploadId = res.data.id;
           this.patchItem(clientId, {
-            status: 'completed',
+            status: 'processing',
             progress: 100,
-            recordId: res.data.id,
+            recordId: uploadId,
+            pipelinePct: 0,
           });
+          this.listenForPipeline(clientId, uploadId);
           this.refreshList();
         },
         error: (err) => {
@@ -165,5 +207,36 @@ export class FileUpload implements OnInit {
           });
         },
       });
+  }
+
+  private listenForPipeline(clientId: string, uploadId: string) {
+    this.socketSubs.get(clientId)?.unsubscribe();
+
+    const sub = this.socket.subscribe(uploadId).subscribe((msg) => {
+      if (msg.event === 'ocr:progress') {
+        this.patchItem(clientId, {
+          status: 'processing',
+          pipelineStep: msg.payload.step as PipelineStep,
+          pipelinePct: msg.payload.pct,
+        });
+      } else if (msg.event === 'ocr:completed') {
+        this.patchItem(clientId, {
+          status: 'completed',
+          pipelinePct: 100,
+        });
+        this.socketSubs.get(clientId)?.unsubscribe();
+        this.socketSubs.delete(clientId);
+        this.refreshList();
+      } else if (msg.event === 'ocr:failed') {
+        this.patchItem(clientId, {
+          status: 'error',
+          error: msg.payload.reason,
+        });
+        this.socketSubs.get(clientId)?.unsubscribe();
+        this.socketSubs.delete(clientId);
+      }
+    });
+
+    this.socketSubs.set(clientId, sub);
   }
 }

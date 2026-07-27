@@ -1,8 +1,14 @@
 import { QueueEvents } from 'bullmq';
 import { env } from '../config/env';
-import { redisConnection } from './queue';
+import { ocrQueue, redisConnection } from './queue';
+import { getIo } from './io';
 
 let ocrQueueEvents: QueueEvents | undefined;
+
+async function resolveUploadId(jobId: string): Promise<string | undefined> {
+  const job = await ocrQueue.getJob(jobId);
+  return job?.data.uploadId;
+}
 
 export function startQueueEvents(): QueueEvents {
   if (ocrQueueEvents) return ocrQueueEvents;
@@ -11,20 +17,25 @@ export function startQueueEvents(): QueueEvents {
     connection: redisConnection,
   });
 
-  ocrQueueEvents.on('completed', ({ jobId, returnvalue }) => {
+  ocrQueueEvents.on('completed', async ({ jobId, returnvalue }) => {
     console.log(`[queue-events] job ${jobId} completed`, returnvalue);
-    // TODO: push to client via socket, e.g.
-    // io.to(`upload:${uploadId}`).emit('ocr:completed', returnvalue);
+    const uploadId = await resolveUploadId(jobId);
+    if (!uploadId) return;
+    getIo().to(`upload:${uploadId}`).emit('ocr:completed', returnvalue);
   });
 
-  ocrQueueEvents.on('failed', ({ jobId, failedReason }) => {
+  ocrQueueEvents.on('failed', async ({ jobId, failedReason }) => {
     console.error(`[queue-events] job ${jobId} failed: ${failedReason}`);
-    // TODO: io.to(`upload:${uploadId}`).emit('ocr:failed', { reason: failedReason });
+    const uploadId = await resolveUploadId(jobId);
+    if (!uploadId) return;
+    getIo().to(`upload:${uploadId}`).emit('ocr:failed', { reason: failedReason });
   });
 
-  ocrQueueEvents.on('progress', ({ jobId, data }) => {
+  ocrQueueEvents.on('progress', async ({ jobId, data }) => {
     console.log(`[queue-events] job ${jobId} progress`, data);
-    // TODO: io.to(`upload:${uploadId}`).emit('ocr:progress', data);
+    const uploadId = await resolveUploadId(jobId);
+    if (!uploadId) return;
+    getIo().to(`upload:${uploadId}`).emit('ocr:progress', data);
   });
 
   ocrQueueEvents.on('active', ({ jobId }) => {
