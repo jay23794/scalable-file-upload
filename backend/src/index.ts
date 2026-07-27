@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import fileUploadOcrRoutes from './features/file-upload-ocr/file-upload-ocr.routes';
+import './infra/queueEvents';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;

@@ -36,3 +36,22 @@ ocrWorker.on('error', (err) => {
 console.log(
   `[worker] listening on queue "${env.ocrQueue.name}" with concurrency ${env.ocrQueue.concurrency}`,
 );
+
+let shuttingDown = false;
+const shutdown = async (signal: NodeJS.Signals) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[worker] ${signal} received, draining in-flight jobs...`);
+  try {
+    await ocrWorker.close();
+    await redisConnection.quit();
+    console.log('[worker] shutdown complete');
+    process.exit(0);
+  } catch (err) {
+    console.error('[worker] shutdown error:', err);
+    process.exit(1);
+  }
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
