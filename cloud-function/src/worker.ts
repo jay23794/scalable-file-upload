@@ -7,13 +7,16 @@ import { OcrJobData } from './pipeline/types';
 export const ocrWorker = new Worker<OcrJobData>(
   env.ocrQueue.name,
   async (job) => {
-    return runPipeline({
-      jobId: job.id ?? job.name,
-      uploadId: job.data.uploadId,
-      storagePath: job.data.storagePath,
-      filename: job.data.filename,
-      mimeType: job.data.mimeType,
-    });
+    return runPipeline(
+      {
+        jobId: job.id ?? job.name,
+        uploadId: job.data.uploadId,
+        storagePath: job.data.storagePath,
+        filename: job.data.filename,
+        mimeType: job.data.mimeType,
+      },
+      (progress) => job.updateProgress(progress),
+    );
   },
   {
     connection: redisConnection,

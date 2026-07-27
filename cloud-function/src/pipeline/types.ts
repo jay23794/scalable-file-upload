@@ -28,7 +28,15 @@ export interface DetectedType {
 export interface ExtractedText {
   text: string;
   pages?: number;
+  confidence?: number;
 }
+
+export interface PipelineProgress {
+  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'ml' | 'store';
+  pct: number;
+}
+
+export type OnProgress = (progress: PipelineProgress) => void | Promise<void>;
 
 export interface TextChunk {
   index: number;
