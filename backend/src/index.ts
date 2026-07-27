@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import fileUploadOcrRoutes from './features/file-upload-ocr/file-upload-ocr.routes';
-import './infra/queueEvents';
+import { startQueueEvents } from './infra/queueEvents';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
@@ -17,4 +17,5 @@ app.use('/api/v1/file-upload-ocr', fileUploadOcrRoutes);
 
 app.listen(PORT, () => {
   console.log(`Backend listening on http://localhost:${PORT}`);
+  startQueueEvents();
 });
