@@ -10,7 +10,7 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
 |---|---|---|---|
 | **Frontend (Angular)** | User picks file, gets a presigned URL, uploads directly to Supabase | 4200 | `cd frontend && npm start` |
 | **Backend API (Express)** | Issues presigned URLs, records uploads, enqueues OCR jobs | 3000 | `cd backend && npm run dev` |
-| **Redis** | Message broker (BullMQ queue `ocr-queue`) | 6379 | `brew services start redis` |
+| **Redis** | Message broker (BullMQ queue `ocr-queue`) | 6379 | `docker run -d --name redis -p 6379:6379 redis:7-alpine` (first time) then `docker start redis` |
 | **Cloud Function — HTTP** | Health/introspection only | 4000 | `cd cloud-function && npm run dev` |
 | **Cloud Function — Worker** | BullMQ consumer running the pipeline | — | `cd cloud-function && npm run worker` |
 | **Supabase Storage** | File storage (external, managed) | — | — |
@@ -60,14 +60,15 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
         │  new Worker('ocr-queue', runPipeline,     │
         │             { concurrency: 5 })           │
         │                                           │
-        │  Pipeline:                                │
-        │    downloadFile      ← Supabase           │
-        │    detectFileType                         │
-        │    extractText (OCR)                      │
-        │    cleanText                              │
-        │    chunkText                              │
-        │    callMlService     → ML service (5000)  │
-        │    storeMetadata     → Postgres / Mongo   │
+        │  Pipeline (each step reports progress):   │
+        │    downloadFile      ← Supabase   (10%)   │
+        │    detectFileType                 (25%)   │
+        │    extractText       Tesseract /  (40%)   │
+        │                      pdf-parse            │
+        │    cleanText                      (60%)   │
+        │    chunkText                      (70%)   │
+        │    callMlService     → ML (stub)  (85%)   │
+        │    storeMetadata     → log (stub) (95%)   │
         │                                           │
         │  return meta   ─ BullMQ publishes         │
         │  throw err     ─ 'completed' / 'failed'   │
@@ -165,6 +166,19 @@ interface OcrJobData {
 
 If this shape changes, update **both** files.
 
+### `PipelineProgress` (progress payload)
+
+Emitted by the worker via `job.updateProgress(...)` and consumed by the backend's `QueueEvents.on('progress')`. Defined in `cloud-function/src/pipeline/types.ts`:
+
+```ts
+interface PipelineProgress {
+  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'ml' | 'store';
+  pct: number;
+}
+```
+
+`runPipeline` accepts an optional `onProgress: (p: PipelineProgress) => void` callback so `handlers/process.ts` stays free of any BullMQ import — the worker injects `(p) => job.updateProgress(p)` at the call site.
+
 ### Queue configuration
 
 Set in `backend/src/infra/queue.ts`:
@@ -223,7 +237,7 @@ The worker does not HTTP-POST status back. Instead:
 
 - Worker returns `meta` → BullMQ publishes a `completed` event into Redis.
 - Worker throws → BullMQ publishes `failed`.
-- Worker calls `job.updateProgress(pct)` → BullMQ publishes `progress`.
+- Worker calls `job.updateProgress({ step, pct })` → BullMQ publishes `progress`. Currently fired at 7 checkpoints (see `PipelineProgress` above).
 
 Backend subscribes via `QueueEvents` (`backend/src/infra/queueEvents.ts`):
 
@@ -253,10 +267,383 @@ No HTTP callback URLs, no shared secrets, no retries needed on the status path �
 
 ---
 
+## Recovery & Idempotency
+
+Redis is a **fast transport, not the source of truth.** MongoDB is authoritative for upload state. If Redis loses jobs (crash, failover, or data-plane outage), the pipeline recovers itself — no manual re-upload needed.
+
+### Recovery Sweeper Diagram
+
+```
+   ┌──────────────────────────────────────────────────────────┐
+   │  Backend — Recovery Sweeper (cron / BullMQ repeatable)   │
+   │  runs every 5 minutes                                    │
+   └───────────────────────┬──────────────────────────────────┘
+                           │
+                           │  1. query MongoDB
+                           ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  MongoDB — find({                                        │
+   │    status ∈ [pending, ocr_processing, ml_processing],    │
+   │    updatedAt < now - 10min                               │
+   │  })                                                      │
+   └───────────────────────┬──────────────────────────────────┘
+                           │
+                           │  2. stuck uploads[]
+                           ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  For each stuck upload:                                  │
+   │                                                          │
+   │    ocrQueue.add('process', jobData, {                    │
+   │      jobId: uploadId  ← idempotent enqueue               │
+   │    })                                                    │
+   │                                                          │
+   │  BullMQ dedupes by jobId → no duplicate work             │
+   └───────────────────────┬──────────────────────────────────┘
+                           │
+                           │  3. job re-enters ocr-queue
+                           ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  OCR Worker (or ML Service) picks up the job             │
+   │                                                          │
+   │    status = await Mongo.getStatus(uploadId)              │
+   │                                                          │
+   │    if (status === 'ready')       → return (done)         │
+   │    if (status === 'ocr_done')    → skip OCR,             │
+   │                                    enqueue ml-queue      │
+   │    if (status === 'pending')     → run full pipeline     │
+   │                                                          │
+   │  Workers re-check status → skip already-completed steps  │
+   └──────────────────────────────────────────────────────────┘
+
+              Rule: If it's not in MongoDB, it didn't happen.
+              If it IS in MongoDB and hasn't advanced in 10 min,
+              the sweeper pushes it forward again.
+```
+
+### Recovery sweeper
+
+A scheduled job runs every **5 minutes** on the backend. It scans MongoDB for uploads stuck in an in-flight state:
+
+```ts
+// runs every 5m (cron / BullMQ repeatable)
+const stuck = await Upload.find({
+  status: { $in: ['pending', 'ocr_processing', 'ml_processing'] },
+  updatedAt: { $lt: new Date(Date.now() - 10 * 60 * 1000) }  // stuck >10min
+});
+
+for (const upload of stuck) {
+  await ocrQueue.add('process', buildJobData(upload), {
+    jobId: upload.uploadId  // ← idempotent enqueue
+  });
+}
+```
+
+### Why this is safe to replay
+
+- **`jobId: uploadId`** — BullMQ dedupes by jobId. If the job is already in the queue, re-enqueue is a no-op.
+- **Workers re-check MongoDB status before doing work.** A replayed job whose upload is already `ocr_done` skips extraction and jumps straight to the ML enqueue step. Already `ready` → returns immediately.
+- **Every pipeline step is idempotent** when keyed by `uploadId` (+ `chunkIndex` for Milvus writes). Re-running produces the same result.
+
+### What this protects against
+
+| Scenario | Recovery path |
+|---|---|
+| Redis restarts and loses in-flight jobs | Sweeper re-enqueues from MongoDB within 5–10 min |
+| Worker crashes after enqueueing to `ml-queue` but before updating Mongo | Next sweeper run sees `ocr_processing` stuck → re-enqueues; worker skips OCR (status already `ocr_done` when it re-checks) |
+| Retries exhausted (`attempts: 3`) → job in failed set | Sweeper eventually re-enqueues (unless status hit terminal `failed`); or manual retry via admin endpoint |
+| Backend deploy while jobs in flight | Nothing lost — jobs continue on workers, events buffered in Redis, backend re-subscribes on boot |
+
+### Rule of thumb
+
+**If it's not in MongoDB, it didn't happen.** If it *is* in MongoDB but hasn't advanced in 10 minutes, the sweeper will push it forward again.
+
+---
+
+## What's Wired
+
+- **`extractText`** — real OCR: `pdf-parse` v2 for PDFs (`PDFParse.getText()` → `{ text, pages }`), `tesseract.js` for images (`{ text, confidence }`), utf-8 decode for plain text.
+- **Pipeline progress** — `job.updateProgress({ step, pct })` fires at 7 checkpoints; the backend `QueueEvents` subscriber logs them today (socket push is TODO).
+- **Graceful shutdown** — worker traps SIGINT/SIGTERM, drains in-flight jobs via `ocrWorker.close()` then `redisConnection.quit()`.
+
 ## What's Not Wired Yet
 
 - **`storeMetadata`** currently logs only — needs Postgres/Mongo persistence.
 - **`callMlService`** returns stub embeddings — needs real HTTP call to Python service.
-- **`QueueEvents` subscribers** log to console — need to be wired into the socket layer to push updates to the frontend.
+- **`QueueEvents` subscribers** log to console — need to be wired into the socket layer to push updates to the frontend (Socket.IO on backend :3000, `upload:${uploadId}` room).
 - **Vector storage** (Milvus or similar) — a `storeVectors` step will be added after `callMlService`.
-- **Graceful shutdown** — worker should trap SIGINT/SIGTERM and close cleanly (Step 8).
+- **Upload status persistence** — `UploadRecord` has no `status` field; if the client is offline when the socket fires, there's no way to recover the outcome. Poll fallback would need this.
+
+---
+
+## Future Scope
+
+Two migration paths depending on load. Both preserve the current interfaces (`OcrJobData`, `PipelineJob`, `onProgress` callback) so the pipeline code doesn't have to be rewritten.
+
+### Option A — Hybrid (BullMQ orchestration + AWS managed data plane)
+
+**Target load**: ~5k users, files up to 100MB (300-500 page PDFs), ~100 uploads/hour peak.
+
+Keep BullMQ as the orchestrator, swap only the data-plane components. The pipeline steps in `handlers/process.ts` stay identical.
+
+```
+                       ┌────────────────────┐
+                       │  Frontend (Angular)│
+                       │  S3 + CloudFront   │
+                       └─────────┬──────────┘
+                                 │
+                 ┌───────────────┴───────────────┐
+                 │  1. request presigned URL     │
+                 │  2. POST /complete            │
+                 │  3. WebSocket subscribe       │
+                 ▼                               │
+        ┌────────────────────────┐               │
+        │  Backend API (Express) │               │
+        │  ECS Fargate + ALB     │  3. PUT file  │
+        │  + Socket.IO server    │◀──────────────┘
+        │  - presign             │
+        │  - /complete           │               ▼
+        │    → insert MongoDB    │     ┌──────────────────────┐
+        │      (status='pending')│     │ S3 (KMS-encrypted)   │
+        │    → enqueue ocr-queue │     │ Lifecycle → Glacier  │
+        └─────────┬──────────────┘     │ (30d)                │
+                  │                    └──────────────────────┘
+                  │  4. ocr-queue.add            ▲
+                  ▼                              │
+        ┌─────────────────────────┐              │
+        │ ElastiCache Redis       │              │
+        │ (Multi-AZ)              │              │
+        │  • queue: ocr-queue     │              │
+        │  • queue: ml-queue      │              │
+        │  • event channels       │              │
+        │  + DLQ per queue        │              │
+        └─────────┬───────────────┘              │
+                  │                              │
+                  │  5. bpop ocr-queue           │
+                  ▼                              │
+        ┌───────────────────────────────────────────┐
+        │  OCR Worker — ECS Fargate (autoscaled)    │
+        │  target-tracking on ocr_queue_depth       │
+        │                                           │
+        │  runPipeline(job, onProgress):            │
+        │    downloadFile  ← stream from S3  ───────┘         ┌────────────────┐
+        │    detectFileType                                   │  AWS Textract  │
+        │    extractText:                                     │  async API     │
+        │      • pdf-parse   (text PDFs, free)                └────────────────┘
+        │      • Textract    (scanned) ─────────────────────────────▲
+        │    cleanText / chunkText                                  │
+        │    callMlService  ── ml-queue.add({uploadId, chunks}) ─┐  │
+        │    storeMetadata  ── MongoDB (status='ocr_done') ──┐   │  │
+        │                                                    │   │  │
+        └─────────┬──────────────────────────────────────────┘   │  │
+                  │                                              │  │
+                  │  6a. ocr-queue 'completed' event             │  │
+                  ▼                                              │  │
+        ┌────────────────────┐                                   │  │
+        │ ElastiCache Redis  │◀──────────────────────────────────┘  │
+        │ (event channel)    │                                      │
+        └─────────┬──────────┘                                      │
+                  │                                                 │
+                  │  7. QueueEvents subscribers                     │
+                  │     • ocr-queue.on('completed'|'failed'|        │
+                  │                    'progress')                  │
+                  │     • ml-queue .on('completed'|'failed')        │
+                  ▼                                                 │
+        ┌────────────────────────┐          ┌────────────────────┐  │
+        │  Backend API           │─────────▶│ MongoDB            │  │
+        │  QueueEvents +         │  update  │ UploadRecord       │  │
+        │  Socket.IO emit        │◀─────────│ (status, progress, │  │
+        │  upload:${id} room     │   read   │  chunk count,      │  │
+        │                        │          │  ocr summary)      │  │
+        └─────────┬──────────────┘          └────────────────────┘  │
+                  │                                                 │
+                  │  8. socket push events:                         │
+                  │      • 'progress'   (from ocr-queue progress)   │
+                  │      • 'ocr:done'   (from ocr-queue completed)  │
+                  │      • 'ml:done'    (from ml-queue completed)   │
+                  │      • 'failed'     (from either queue)         │
+                  ▼                                                 │
+        ┌────────────────────┐                                      │
+        │  Frontend          │                                      │
+        └────────────────────┘                                      │
+                                                                    │
+── ML Service (separate Fargate deployment) ────────────────────────┼──
+                                                                    │
+        ┌──────────────────────────────────────────────┐            │
+        │  ML Service — ECS Fargate (Python)           │            │
+        │  autoscaled on ml_queue_depth                │            │
+        │                                              │            │
+        │  BullMQ Worker on ml-queue:                  │            │
+        │    receive { uploadId, chunks }              │            │
+        │    → compute embeddings                      │            │
+        │    → write vectors to Milvus  ───────────────┼──▶ ┌────────────────┐
+        │    → return meta (BullMQ 'completed' event)  │    │ Milvus         │
+        └──────────────────────────────────────────────┘    │ (vector DB —   │
+                          │                                 │  ML-owned;     │
+                          │  ml-queue 'completed'           │  keyed by      │
+                          │  event via BullMQ QueueEvents   │  uploadId +    │
+                          ▼                                 │  chunk index)  │
+                    ElastiCache Redis                       └────────────────┘
+                    (event channel — flows into
+                     Backend QueueEvents at step 7)
+
+Ownership boundaries:
+  - Backend:      /presign, /complete, Socket.IO. Sole writer of MongoDB status.
+                  Sole authority for FE communication.
+  - OCR Worker:   OCR + cleaning + chunking. Enqueues to ml-queue.
+                  Writes OCR-result summary to MongoDB. Never touches Milvus.
+  - ML Service:   Embeddings + Milvus writes. Sole writer to vector store.
+                  Signals completion via ml-queue BullMQ event stream.
+
+Observability : Sentry (exceptions) + Datadog / CloudWatch (metrics + logs)
+Security      : KMS-encrypted S3, IAM roles on Fargate, VPC-only ElastiCache + Milvus
+Secrets       : AWS Secrets Manager / SSM Parameter Store
+
+────────────────────────────────────────────────────────────────────
+Alternative — Pattern 1 (Sync) — simpler starting point:
+  Replace the ml-queue with a direct HTTP call:
+    Worker → POST /embed on ML Service → wait for 200 OK → storeMetadata
+  Pros:  one queue, one completion event, easier to reason about.
+  Cons:  worker task blocked during embedding compute (30s-2min on big docs).
+  Migrate to the async ml-queue pattern (as drawn above) when ML compute
+  time starts bottlenecking OCR worker capacity.
+────────────────────────────────────────────────────────────────────
+```
+
+| Layer | Now (dev) | Hybrid (prod) | Trigger to migrate |
+|---|---|---|---|
+| Queue transport | Redis (Docker) | **ElastiCache Redis** (Multi-AZ) | Any real production traffic |
+| Worker runtime | `npm run worker` on VPS | **ECS Fargate** tasks, autoscale on queue depth | >4 concurrent jobs sustained |
+| OCR — text PDFs | `pdf-parse` | `pdf-parse` (unchanged, ~free) | — |
+| OCR — scanned PDFs / images | `tesseract.js` | **AWS Textract** async API (`StartDocumentAnalysis`) | Quality complaints, or files >20 pages |
+| ML / embeddings | stub `callMlService` | **In-house ML Service** on ECS Fargate (Python) — computes embeddings and writes to Milvus directly | When real embeddings are needed |
+| Vector store | — | **Milvus** — owned by the ML service, worker never touches it | With the ML service |
+| ML → backend signalling | — | ML service **publishes `ml:done` on Redis pub/sub**; backend listens and pushes to Socket.IO | Same rollout as ML service |
+
+| File storage | Supabase Storage | **S3** with lifecycle → Glacier after 30d | Storage cost >$100/month |
+| Status push | Socket.IO on backend | Socket.IO on backend (unchanged; single source of truth for FE) | — |
+
+**Why keep BullMQ**: retries, DLQ semantics, delayed jobs, priority queues, job introspection — building this on raw SQS is weeks of work. BullMQ handles it in one library.
+
+**Why Fargate, not Lambda**: Lambda's 15-minute execution cap kills OCR on large scanned PDFs. Fargate has no hard limit and autoscales on custom CloudWatch metrics (queue depth).
+
+**Why `pdf-parse` before Textract**: most PDFs have embedded text and don't need OCR. Detecting text-vs-scanned first and only falling back to Textract for scanned pages cuts OCR spend by ~10x.
+
+**Non-functional additions required for prod**:
+- **DLQ + alerting** on failed-job depth (Datadog / CloudWatch alarm)
+- **Idempotent job IDs** derived from `uploadId` so retries don't double-process
+- **Streaming** downloads instead of buffering 100MB into RAM
+- **Textract async API** for anything >10 pages (don't block a task on sync OCR)
+- **Observability**: Sentry for exceptions, Datadog for `ocr_queue_depth` + p95 job duration
+- **Security**: KMS-encrypted S3, IAM roles on Fargate tasks, VPC-only ElastiCache, PII redaction on OCR output before persist
+- **Cost controls**: reserved Fargate capacity, Textract async pricing, CloudWatch budget alarms
+
+### Option B — Full AWS Managed (drop BullMQ)
+
+**Target load**: 50k+ users, sustained bursty load, multi-region, dedicated ops team.
+
+Rewrite the transport layer around AWS-native primitives. Pipeline logic can still live in the same TypeScript, packaged as Lambda or Fargate.
+
+```
+                       ┌────────────────────┐
+                       │  Frontend (Angular)│
+                       │  S3 + CloudFront   │
+                       └─────────┬──────────┘
+                                 │
+                 ┌───────────────┴───────────────┐
+                 │  1. request presigned URL     │
+                 │  2. POST completeUpload       │
+                 │  3. WebSocket $connect        │
+                 ▼                               │
+        ┌────────────────────────┐               │
+        │  API Gateway           │               │
+        │  (REST + WebSocket)    │               │
+        └─────────┬──────────────┘               │
+                  │                              │
+                  │  4. Lambda invocation        │
+                  ▼                              │
+        ┌────────────────────────┐               │
+        │  Lambda (backend)      │  3. PUT file  │
+        │  - presign             │◀──────────────┘
+        │  - complete            │
+        │  - enqueue → SQS       │               ▼
+        │  - store conn in DDB   │      ┌──────────────────────┐
+        └─────────┬──────────────┘      │ S3 (KMS-encrypted)   │
+                  │                     │ Lifecycle → Glacier  │
+                  │  5. SendMessage     └──────────────────────┘
+                  ▼                                 ▲
+        ┌────────────────────┐                     │
+        │ SQS Standard Queue │                     │
+        │ + DLQ (maxReceive) │                     │
+        └─────────┬──────────┘                     │
+                  │                                │
+                  │  6. Event source trigger       │
+                  ▼                                │
+        ┌───────────────────────────────────────────┐
+        │  Worker runtime (pick one):               │
+        │  • Lambda (jobs < 15 min)                 │
+        │  • ECS Fargate (long-running jobs)        │
+        │  • Step Functions (fan-out per page)      │
+        │                                           │       ┌────────────────┐
+        │  runPipeline steps:                       │       │  AWS Textract  │
+        │    downloadFile   ← stream from S3 ───────┘       │  async API     │
+        │    detectFileType                         │──────▶└────────────────┘
+        │    extractText  ──────────────────────────┼──┐
+        │    cleanText / chunkText                  │  │    ┌────────────────┐
+        │    callMlService ─────────────────────────┼──┼───▶│  Bedrock       │
+        │    storeMetadata ─────────────────────────┼──┼──┐ │  InvokeModel   │
+        │    storeVectors  ─────────────────────────┼──┘  │ └────────────────┘
+        └─────────┬─────────────────────────────────┘     │
+                  │                                       │ ┌────────────────┐
+                  │  7. PutEvents (ocr.completed / failed │▶│ DynamoDB /     │
+                  │      / progress) on completion        │ │ Aurora         │
+                  ▼                                       │ └────────────────┘
+        ┌────────────────────┐                            │
+        │  EventBridge Bus   │                            │ ┌────────────────┐
+        └─────────┬──────────┘                            └▶│ OpenSearch     │
+                  │                                         │ Serverless     │
+                  │  8. Rule → Lambda                       │ (knn vectors)  │
+                  ▼                                         └────────────────┘
+        ┌────────────────────┐
+        │  Push Lambda       │
+        │  - lookup conn IDs │
+        │    in DynamoDB     │
+        │  - PostToConnection│
+        │    via API Gw MgmtAPI
+        └─────────┬──────────┘
+                  │
+                  │  9. WebSocket push
+                  ▼
+        ┌────────────────────┐
+        │  Frontend          │
+        └────────────────────┘
+
+Observability : CloudWatch Logs + Metrics, X-Ray distributed tracing
+Secrets       : AWS Secrets Manager
+IAM           : Least-privilege roles per Lambda / Fargate task
+```
+
+| Concern | Current implementation | AWS-managed replacement |
+|---|---|---|
+| Job queue | BullMQ `Queue` (`backend/src/infra/queue.ts`) | **SQS** standard queue + DLQ |
+| Job events (`completed`/`failed`/`progress`) | BullMQ `QueueEvents` | **EventBridge** rules + SNS fan-out, or **AppSync subscriptions** |
+| Worker runtime | Node BullMQ `Worker` (`cloud-function/src/worker.ts`) | **ECS Fargate** for long jobs, or **Lambda** for short (<15min) jobs, or **Step Functions** for >15min fan-out |
+| Retries / backoff | BullMQ `defaultJobOptions` | SQS `maxReceiveCount` + Lambda destinations, or Step Functions retry state |
+| Presign / metadata API | Express on `:3000` | **API Gateway** + Lambda, or ECS Fargate behind ALB |
+| Status push to frontend | Socket.IO on Express | **API Gateway WebSocket** + Lambda + DynamoDB connection table |
+| Metadata store | Postgres/Mongo (planned) | **DynamoDB** (single-digit ms) or **RDS Aurora Serverless** |
+| Object storage | Supabase Storage | **S3** with presigned URLs (same pattern as today) |
+| OCR | Tesseract / pdf-parse | **AWS Textract** (sync `AnalyzeDocument` or async `StartDocumentAnalysis`) |
+| Embeddings / ML | Python service (planned) | **Bedrock** (`InvokeModel` for embeddings) or **SageMaker** endpoint |
+| Vector storage | Milvus (planned) | **OpenSearch Serverless** with `knn` vectors, or **Pinecone** (managed, non-AWS) |
+| Config / secrets | `.env` files | **Systems Manager Parameter Store** or **Secrets Manager** |
+| Observability | `console.log` | **CloudWatch Logs**, **X-Ray** tracing, **CloudWatch Metrics** |
+
+**Trigger to migrate**: >100 sustained jobs/min, multi-region requirement, or when Redis HA + Fargate ops burden exceeds the AWS bill delta.
+
+**Cost floor**: ~$0 fixed (scale-to-zero), but variable cost grows fast — Textract at $1.50 per 1000 pages, DynamoDB read/write units, egress fees.
+
+**Trade-offs vs Hybrid**:
+- ✅ True scale-to-zero, multi-region built-in, DLQ / retry native, no worker VM to babysit
+- ❌ Vendor lock-in (SQS/EventBridge/Textract APIs are AWS-only)
+- ❌ Local dev requires LocalStack or full AWS credentials — no more `docker start redis`
+- ❌ Debugging distributed Lambda + Step Functions is materially harder than tailing a Node process
