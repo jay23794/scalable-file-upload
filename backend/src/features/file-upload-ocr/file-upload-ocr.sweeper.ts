@@ -3,7 +3,7 @@ import { FileUploadOcrService } from './file-upload-ocr.service';
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
-
+ 
 const HEALTHY_STATES: ReadonlyArray<JobState | 'unknown'> = [
   'waiting',
   'active',
