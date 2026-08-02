@@ -26,7 +26,7 @@ export class SocketService implements OnDestroy {
 
       const emitSubscribe = () => socket.emit('subscribe', { uploadId });
       if (socket.connected) emitSubscribe();
-      else socket.once('connect', emitSubscribe);
+      socket.on('connect', emitSubscribe);
 
       const onProgress = (payload: { step: string; pct: number }) =>
         subscriber.next({ event: 'ocr:progress', payload });
@@ -40,6 +40,7 @@ export class SocketService implements OnDestroy {
       socket.on('ocr:failed', onFailed);
 
       return () => {
+        socket.off('connect', emitSubscribe);
         socket.off('ocr:progress', onProgress);
         socket.off('ocr:completed', onCompleted);
         socket.off('ocr:failed', onFailed);

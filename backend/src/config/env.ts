@@ -15,12 +15,15 @@ export const env = {
     bucket: required('SUPABASE_BUCKET', process.env.SUPABASE_BUCKET),
   },
   signedUrl: {
-    downloadTtlSeconds: 60 * 10,
+    downloadTtlSeconds: 60 * 60,
   },
   redis: {
     url: process.env.REDIS_URL ?? 'redis://localhost:6379',
   },
   ocrQueue: {
     name: process.env.OCR_QUEUE_NAME ?? 'ocr-queue',
+  },
+  mongo: {
+    uri: process.env.MONGODB_URI ?? 'mongodb://localhost:27017/feature',
   },
 };

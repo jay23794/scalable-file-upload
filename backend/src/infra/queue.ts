@@ -7,6 +7,7 @@ export interface OcrJobData {
   storagePath: string;
   filename: string;
   mimeType: string;
+  downloadUrl: string;
 }
 
 export const redisConnection = new IORedis(env.redis.url, {

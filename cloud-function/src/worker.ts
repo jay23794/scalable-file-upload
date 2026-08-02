@@ -14,6 +14,7 @@ export const ocrWorker = new Worker<OcrJobData>(
         storagePath: job.data.storagePath,
         filename: job.data.filename,
         mimeType: job.data.mimeType,
+        downloadUrl: job.data.downloadUrl,
       },
       (progress) => job.updateProgress(progress),
     );

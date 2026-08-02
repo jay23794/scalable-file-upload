@@ -31,8 +31,13 @@ export const complete = async (req: Request, res: Response) => {
   }
 };
 
-export const list = (_req: Request, res: Response) => {
-  return res.json(successResponse(fileUploadOcrService.listUploads()));
+export const list = async (_req: Request, res: Response) => {
+  try {
+    const records = await fileUploadOcrService.listUploads();
+    return res.json(successResponse(records));
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as Error).message });
+  }
 };
 
 export const getById = async (req: Request, res: Response) => {

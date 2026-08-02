@@ -1,29 +1,42 @@
-export interface UploadRecord {
-  id: string;
-  path: string;
-  filename: string;
-  size: number;
-  mimeType: string;
-  createdAt: Date;
-}
+import { IN_FLIGHT_STATUSES, UploadRecord, UploadStatus } from './types';
+import { UploadModel, toRecord } from './file-upload-ocr.model';
 
 export class FileUploadOcrRepository {
-  private store = new Map<string, UploadRecord>();
-
-  create(record: UploadRecord): UploadRecord {
-    this.store.set(record.id, record);
-    return record;
+  async create(record: UploadRecord): Promise<UploadRecord> {
+    const { id, ...rest } = record;
+    const doc = await UploadModel.create({ _id: id, ...rest });
+    return toRecord(doc);
   }
 
-  findById(id: string): UploadRecord | undefined {
-    return this.store.get(id);
+  async findById(id: string): Promise<UploadRecord | undefined> {
+    const doc = await UploadModel.findById(id);
+    return doc ? toRecord(doc) : undefined;
   }
 
-  list(): UploadRecord[] {
-    return Array.from(this.store.values());
+  async list(): Promise<UploadRecord[]> {
+    const docs = await UploadModel.find().sort({ createdAt: -1 });
+    return docs.map(toRecord);
   }
 
-  delete(id: string): boolean {
-    return this.store.delete(id);
+  async delete(id: string): Promise<boolean> {
+    const res = await UploadModel.deleteOne({ _id: id });
+    return res.deletedCount === 1;
+  }
+
+  async updateStatus(id: string, status: UploadStatus): Promise<UploadRecord | undefined> {
+    const doc = await UploadModel.findByIdAndUpdate(
+      id,
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: 'after' },
+    );
+    return doc ? toRecord(doc) : undefined;
+  }
+
+  async findStuck(olderThan: Date): Promise<UploadRecord[]> {
+    const docs = await UploadModel.find({
+      status: { $in: IN_FLIGHT_STATUSES },
+      updatedAt: { $lt: olderThan },
+    });
+    return docs.map(toRecord);
   }
 }

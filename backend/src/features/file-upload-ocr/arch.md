@@ -273,13 +273,15 @@ Redis is a **fast transport, not the source of truth.** MongoDB is authoritative
 
 ### Recovery Sweeper Diagram
 
+The sweeper runs a **two-stage filter**: a cheap DB scan flags candidates, then a per-record BullMQ state check decides what to actually do. This prevents false-positive re-enqueues when the queue simply has a deep backlog (a job waiting behind 10k others also has an old `updatedAt`, but it isn't stuck — it's just queued).
+
 ```
    ┌──────────────────────────────────────────────────────────┐
    │  Backend — Recovery Sweeper (cron / BullMQ repeatable)   │
    │  runs every 5 minutes                                    │
    └───────────────────────┬──────────────────────────────────┘
                            │
-                           │  1. query MongoDB
+                           │  1. query MongoDB (cheap first pass)
                            ▼
    ┌──────────────────────────────────────────────────────────┐
    │  MongoDB — find({                                        │
@@ -288,19 +290,41 @@ Redis is a **fast transport, not the source of truth.** MongoDB is authoritative
    │  })                                                      │
    └───────────────────────┬──────────────────────────────────┘
                            │
-                           │  2. stuck uploads[]
+                           │  2. candidates[] (stuck by clock only)
                            ▼
    ┌──────────────────────────────────────────────────────────┐
-   │  For each stuck upload:                                  │
+   │  For each candidate — ask BullMQ what's actually true:   │
    │                                                          │
-   │    ocrQueue.add('process', jobData, {                    │
-   │      jobId: uploadId  ← idempotent enqueue               │
-   │    })                                                    │
+   │    state = await ocrQueue.getJob(uploadId).getState()    │
    │                                                          │
-   │  BullMQ dedupes by jobId → no duplicate work             │
+   │  ┌────────────────────────────────────────────────────┐  │
+   │  │ waiting / active / delayed / prioritized /         │  │
+   │  │ waiting-children                                   │  │
+   │  │   → HEALTHY. Job is in the backlog or being        │  │
+   │  │     processed. Skip. (No re-add — the record's     │  │
+   │  │     old updatedAt just reflects queue depth,       │  │
+   │  │     not a lost job.)                               │  │
+   │  ├────────────────────────────────────────────────────┤  │
+   │  │ completed                                          │  │
+   │  │   → RECONCILE. Job finished but the backend        │  │
+   │  │     missed the event (e.g. was restarting).        │  │
+   │  │     Upload.markReady(uploadId).                    │  │
+   │  ├────────────────────────────────────────────────────┤  │
+   │  │ failed                                             │  │
+   │  │   → RECONCILE. Retries exhausted.                  │  │
+   │  │     Upload.markFailed(uploadId).                   │  │
+   │  ├────────────────────────────────────────────────────┤  │
+   │  │ undefined  (job missing from Redis)                │  │
+   │  │   → REENQUEUE. Redis lost it (crash, eviction).    │  │
+   │  │                                                    │  │
+   │  │     ocrQueue.add('process', jobData, {             │  │
+   │  │       jobId: uploadId    ← idempotent              │  │
+   │  │     })                                             │  │
+   │  └────────────────────────────────────────────────────┘  │
    └───────────────────────┬──────────────────────────────────┘
                            │
                            │  3. job re-enters ocr-queue
+                           │     (only when re-enqueued)
                            ▼
    ┌──────────────────────────────────────────────────────────┐
    │  OCR Worker (or ML Service) picks up the job             │
@@ -317,30 +341,43 @@ Redis is a **fast transport, not the source of truth.** MongoDB is authoritative
 
               Rule: If it's not in MongoDB, it didn't happen.
               If it IS in MongoDB and hasn't advanced in 10 min,
-              the sweeper pushes it forward again.
+              ask BullMQ before assuming it's lost.
 ```
 
 ### Recovery sweeper
 
-A scheduled job runs every **5 minutes** on the backend. It scans MongoDB for uploads stuck in an in-flight state:
+A scheduled job runs every **5 minutes** on the backend. Stage 1 finds candidates stuck by the clock; stage 2 asks BullMQ what actually happened to each job before acting:
 
 ```ts
 // runs every 5m (cron / BullMQ repeatable)
-const stuck = await Upload.find({
+const HEALTHY = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
+
+const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+const candidates = await Upload.find({
   status: { $in: ['pending', 'ocr_processing', 'ml_processing'] },
-  updatedAt: { $lt: new Date(Date.now() - 10 * 60 * 1000) }  // stuck >10min
+  updatedAt: { $lt: cutoff },   // stage 1 — cheap in-memory / index scan
 });
 
-for (const upload of stuck) {
+for (const upload of candidates) {
+  const job   = await ocrQueue.getJob(upload.uploadId);
+  const state = await job?.getState();   // stage 2 — ask the source of truth
+
+  if (state && HEALTHY.includes(state)) continue;                  // in backlog / running — skip
+  if (state === 'completed') { await Upload.markReady(upload.uploadId);  continue; }
+  if (state === 'failed')    { await Upload.markFailed(upload.uploadId); continue; }
+
+  // state is undefined → job was lost from Redis — re-enqueue
   await ocrQueue.add('process', buildJobData(upload), {
-    jobId: upload.uploadId  // ← idempotent enqueue
+    jobId: upload.uploadId,   // ← idempotent
   });
 }
 ```
 
 ### Why this is safe to replay
 
-- **`jobId: uploadId`** — BullMQ dedupes by jobId. If the job is already in the queue, re-enqueue is a no-op.
+- **`jobId: uploadId`** — BullMQ dedupes by jobId. Even if the state check races, a duplicate `add` while the original is still queued is a no-op.
+- **Stage-2 state check** — the sweeper never re-adds a job that BullMQ still knows about. A 10k-deep backlog produces silent, action-free sweeps; only truly-lost jobs get pushed back in.
+- **Terminal-state reconciliation** — if a job completed or failed while the backend was down, the sweeper fixes the record's status instead of blindly re-enqueueing.
 - **Workers re-check MongoDB status before doing work.** A replayed job whose upload is already `ocr_done` skips extraction and jumps straight to the ML enqueue step. Already `ready` → returns immediately.
 - **Every pipeline step is idempotent** when keyed by `uploadId` (+ `chunkIndex` for Milvus writes). Re-running produces the same result.
 
@@ -348,14 +385,16 @@ for (const upload of stuck) {
 
 | Scenario | Recovery path |
 |---|---|
-| Redis restarts and loses in-flight jobs | Sweeper re-enqueues from MongoDB within 5–10 min |
-| Worker crashes after enqueueing to `ml-queue` but before updating Mongo | Next sweeper run sees `ocr_processing` stuck → re-enqueues; worker skips OCR (status already `ocr_done` when it re-checks) |
-| Retries exhausted (`attempts: 3`) → job in failed set | Sweeper eventually re-enqueues (unless status hit terminal `failed`); or manual retry via admin endpoint |
+| Redis restarts and loses in-flight jobs | Stage-2 sees `undefined` → sweeper re-enqueues from MongoDB within 5–10 min |
+| Worker crashes after enqueueing to `ml-queue` but before updating Mongo | Next sweep: OCR job state is `completed` → status reconciled to `ocr_done`; ML job (if lost) re-enqueued |
+| Backend down when `completed` / `failed` event fired | Stage-2 finds terminal state → reconciles status without re-running the pipeline |
+| Deep queue backlog (10k jobs waiting) | Stage-2 sees `waiting` for every candidate → silent no-op sweep, no runaway re-adds |
+| Retries exhausted (`attempts: 3`) → job in failed set | Stage-2 sees `failed` → status marked `failed`; manual retry via admin endpoint |
 | Backend deploy while jobs in flight | Nothing lost — jobs continue on workers, events buffered in Redis, backend re-subscribes on boot |
 
 ### Rule of thumb
 
-**If it's not in MongoDB, it didn't happen.** If it *is* in MongoDB but hasn't advanced in 10 minutes, the sweeper will push it forward again.
+**If it's not in MongoDB, it didn't happen.** If it *is* in MongoDB but hasn't advanced in 10 minutes, **ask BullMQ before acting** — the queue is the source of truth for what the job is really doing.
 
 ---
 

@@ -2,6 +2,7 @@ import { QueueEvents } from 'bullmq';
 import { env } from '../config/env';
 import { ocrQueue, redisConnection } from './queue';
 import { getIo } from './io';
+import { fileUploadOcrService } from './container';
 
 let ocrQueueEvents: QueueEvents | undefined;
 
@@ -17,10 +18,13 @@ export function startQueueEvents(): QueueEvents {
     connection: redisConnection,
   });
 
+
+
   ocrQueueEvents.on('completed', async ({ jobId, returnvalue }) => {
     console.log(`[queue-events] job ${jobId} completed`, returnvalue);
     const uploadId = await resolveUploadId(jobId);
     if (!uploadId) return;
+    await fileUploadOcrService.markStatus(uploadId, 'ready');
     getIo().to(`upload:${uploadId}`).emit('ocr:completed', returnvalue);
   });
 
@@ -28,6 +32,7 @@ export function startQueueEvents(): QueueEvents {
     console.error(`[queue-events] job ${jobId} failed: ${failedReason}`);
     const uploadId = await resolveUploadId(jobId);
     if (!uploadId) return;
+    await fileUploadOcrService.markStatus(uploadId, 'failed');
     getIo().to(`upload:${uploadId}`).emit('ocr:failed', { reason: failedReason });
   });
 
@@ -38,8 +43,11 @@ export function startQueueEvents(): QueueEvents {
     getIo().to(`upload:${uploadId}`).emit('ocr:progress', data);
   });
 
-  ocrQueueEvents.on('active', ({ jobId }) => {
+  ocrQueueEvents.on('active', async ({ jobId }) => {
     console.log(`[queue-events] job ${jobId} active`);
+    const uploadId = await resolveUploadId(jobId);
+    if (!uploadId) return;
+    await fileUploadOcrService.markStatus(uploadId, 'ocr_processing');
   });
 
   return ocrQueueEvents;

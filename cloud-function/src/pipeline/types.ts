@@ -3,6 +3,7 @@ export interface OcrJobData {
   storagePath: string;
   filename: string;
   mimeType: string;
+  downloadUrl: string;
 }
 
 export interface PipelineJob {
@@ -11,6 +12,7 @@ export interface PipelineJob {
   storagePath: string;
   filename: string;
   mimeType?: string;
+  downloadUrl: string;
 }
 
 export interface DownloadedFile {
