@@ -2,21 +2,21 @@ import express, { Request, Response } from 'express';
 import { env } from './config/env';
 import { embeddingsRouter } from './features/embeddings/embeddings.routes';
 import { warmup } from './infra/embedder';
-import { ensureCollection } from './infra/milvus';
 import { readiness } from './infra/readiness';
+import { getVectorStore } from './infra/vectorstore';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/healthz', (_req: Request, res: Response) => {
   res.json({
-    ok: readiness.modelReady && readiness.milvusReady,
+    ok: readiness.modelReady && readiness.vectorStoreReady,
     service: 'ml',
     model: env.embedding.model,
     dim: env.embedding.dim,
     modelReady: readiness.modelReady,
-    milvusReady: readiness.milvusReady,
-    collection: env.milvus.collection,
+    vectorStoreReady: readiness.vectorStoreReady,
+    vectorStore: env.vectorStore.driver,
   });
 });
 
@@ -34,12 +34,14 @@ app.listen(env.port, () => {
       console.error('embedding model failed to load:', err);
     });
 
-  ensureCollection()
+  const store = getVectorStore();
+  store
+    .init()
     .then(() => {
-      readiness.milvusReady = true;
-      console.log(`milvus collection ready: ${env.milvus.collection}`);
+      readiness.vectorStoreReady = true;
+      console.log(`vector store ready: ${store.name}`);
     })
     .catch((err) => {
-      console.error('milvus init failed:', err);
+      console.error(`vector store init failed (${store.name}):`, err);
     });
 });
