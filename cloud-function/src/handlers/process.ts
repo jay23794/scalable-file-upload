@@ -29,7 +29,7 @@ export async function runPipeline(
   ctx.chunks = chunkText(ctx.cleaned);
 
   await onProgress?.({ step: 'ml', pct: 85 });
-  ctx.ml = await callMlService(ctx.chunks);
+  ctx.ml = await callMlService(job.uploadId, ctx.chunks);
 
   await onProgress?.({ step: 'store', pct: 95 });
   return storeMetadata(ctx);

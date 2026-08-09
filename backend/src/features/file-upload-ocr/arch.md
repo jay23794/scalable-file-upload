@@ -14,8 +14,8 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
 | **Cloud Function — HTTP** | Health/introspection only | 4000 | `cd cloud-function && npm run dev` |
 | **Cloud Function — Worker** | BullMQ consumer running the pipeline | — | `cd cloud-function && npm run worker` |
 | **Supabase Storage** | File storage (external, managed) | — | — |
-| **ML Service (future)** | Python embeddings/vector service | 5000 | (not yet built) |
-| **Vector DB (future, e.g. Milvus)** | Stores embeddings | — | (not yet decided) |
+| **ML Service** | Node/Express embeddings service (Xenova MiniLM-L6-v2, 384-dim), calls Milvus | 5000 (5100 on macOS host — AirPlay squats 5000) | `cd ml && npm run dev` |
+| **Vector DB** | **Zilliz Cloud Serverless** (managed Milvus) — free tier, collection `document_chunks` | — | — (managed) |
 
 ---
 
@@ -214,12 +214,18 @@ Retries and backoff are handled by BullMQ automatically — the worker only need
 
 Both services must agree on the following:
 
-| Var | Backend default | Cloud-function default | Notes |
-|---|---|---|---|
-| `REDIS_URL` | `redis://localhost:6379` | `redis://localhost:6379` | Must point to the same Redis |
-| `OCR_QUEUE_NAME` | `ocr-queue` | `ocr-queue` | Must match exactly |
-| `WORKER_CONCURRENCY` | — | `5` | Cloud-function only |
-| `PORT` | `3000` | `4000` | Independent |
+| Var | Backend | Cloud-function | ml | Notes |
+|---|---|---|---|---|
+| `REDIS_URL` | `redis://localhost:6379` | `redis://localhost:6379` | — | Must point to the same Redis |
+| `OCR_QUEUE_NAME` | `ocr-queue` | `ocr-queue` | — | Must match exactly |
+| `WORKER_CONCURRENCY` | — | `5` | — | Cloud-function only |
+| `PORT` | `3000` | `4000` | `5000` (container) / `5100` (macOS host) | Independent |
+| `ML_SERVICE_URL` | — | `http://localhost:5000` (compose: `http://ml:5000`) | — | Where the worker POSTs `/embed` |
+| `ZILLIZ_URI` | — | — | Zilliz Serverless public endpoint | ml only — holds Milvus creds |
+| `ZILLIZ_TOKEN` | — | — | Zilliz API token | ml only — never leaves the ml container |
+| `MILVUS_COLLECTION` | — | — | `document_chunks` | Auto-created on ml boot |
+| `EMBEDDING_MODEL` | — | — | `Xenova/all-MiniLM-L6-v2` | HuggingFace id; ONNX weights pre-baked into ml image |
+| `EMBEDDING_DIM` | — | — | `384` | Must match the model output dim |
 
 ---
 
@@ -418,12 +424,16 @@ for (const upload of candidates) {
 - **MongoDB persistence** — `UploadRecord` is stored in Mongo via Mongoose. `_id` is the app-level UUID (no ObjectId), compound index on `{status, updatedAt}` powers the sweeper's stage-1 scan. Backend connects before `httpServer.listen` and disconnects on SIGINT/SIGTERM.
 - **Recovery sweeper implemented** (`file-upload-ocr.sweeper.ts`) — runs every 5 min, `STUCK_THRESHOLD_MS` = 10 min, stage-2 BullMQ state check per candidate (`waiting/active/... → skip`, `completed → mark ready`, `failed → mark failed`, `unknown → reenqueue` with a fresh signed URL).
 - **Graceful shutdown** — worker traps SIGINT/SIGTERM, drains in-flight jobs via `ocrWorker.close()` then `redisConnection.quit()`. Backend closes the HTTP server and disconnects Mongo.
+- **`callMlService`** — real `fetch(ML_SERVICE_URL + '/embed', { uploadId, chunks })`. Worker no longer holds any embeddings; response is `{ chunkCount, dim, model }`. Errors throw → BullMQ retries per policy.
+- **`ml` microservice** (`ml/`) — Node/Express on :5000 (mapped to :5100 on macOS host to dodge AirPlay). Endpoints: `POST /embed`, `GET /healthz` (reports `modelReady` + `milvusReady`). Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model is pre-baked into the Docker image so container cold starts don't fetch from HuggingFace.
+- **Milvus (Zilliz Cloud Serverless, free tier)** — owned entirely by the `ml` service. Collection `document_chunks` is created on first boot via `ensureCollection` (`pk`, `upload_id`, `chunk_index`, `text`, `embedding FloatVector(384)`, `created_at`; `AUTOINDEX` on embedding, `COSINE` metric). Upserts are keyed by `pk = "${uploadId}:${chunkIndex}"` → BullMQ retries produce overwrites, not duplicates.
+- **Transport worker→ml** — sync HTTP (`ML_SERVICE_URL/embed`). Chosen per arch line 563 ("Pattern 1 (Sync)") — swap to the async `ml-queue` pattern only when embed time bottlenecks OCR worker concurrency.
 
 ## What's Not Wired Yet
 
-- **`storeMetadata`** currently logs only — the *upload record* is in Mongo, but the *pipeline output* (chunks, embeddings summary, OCR text) is not persisted.
-- **`callMlService`** returns stub embeddings — needs real HTTP call to Python service.
-- **Vector storage** (Milvus or similar) — a `storeVectors` step will be added after `callMlService`.
+- **`storeMetadata`** currently logs only — the *upload record* is in Mongo, but the *pipeline output summary* (chunk count, embedding model, dim, OCR text stats) is not persisted to Mongo yet. The embeddings themselves live in Milvus (correct) — only the summary write to Mongo is missing.
+- **Search endpoint on `ml`** (`POST /search`) — needed once the chatbot work starts. Same Milvus connection + same encoder, deferred until then.
+- **Chatbot / RAG layer** — not started. Will call ml `/search` then hand top-k chunks to an LLM (Claude/OpenAI).
 - **Frontend poll fallback** — if a client is offline for the full lifetime of a job (past reconnect window and sweeper interval), the synthetic-replay branch covers most gaps, but a background `GET /uploads/:id` refresh on tab-focus would close the last window.
 
 ---
@@ -432,6 +442,7 @@ for (const upload of candidates) {
 
 - **Backend** is the only holder of the Supabase service-role key. It mints per-object signed URLs (`SupabaseStorageService.createSignedDownloadUrl`) and attaches them to job payloads.
 - **Cloud-function worker** has no Supabase credentials whatsoever. It reads a signed URL from `job.data.downloadUrl` and fetches with global `fetch`. Even if the worker container is compromised, the attacker gets access only to the specific files currently in queue payloads, only for the URL's remaining TTL.
+- **ml service** is the only holder of `ZILLIZ_TOKEN` (Milvus write credentials). Neither backend nor worker can talk to Milvus directly — they must go through the ml HTTP surface. Compromising the worker gives an attacker the ability to enqueue embed requests, not to read or wipe the vector store.
 - **Tradeoff of embedding the URL in the payload**: it lives in Redis for the job's retention window (`removeOnComplete: 1000`, `removeOnFail: 5000`). Anyone with Redis read access can see and use those URLs until they expire. Acceptable on a private single-tenant Redis; if that changes, migrate to mint-on-demand (worker calls a backend `/internal/signed-url` endpoint per job). Do **not** ship the service-role key to the worker as a shortcut — that grants access to every object, not just the one being processed.
 
 ---

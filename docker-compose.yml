@@ -44,10 +44,29 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - BACKEND_BASE_URL=http://backend:3000
+      - ML_SERVICE_URL=http://ml:5000
       - WORKER_CONCURRENCY=5
     depends_on:
       redis:
         condition: service_healthy
+      ml:
+        condition: service_healthy
+
+  ml:
+    build:
+      context: ./ml
+    env_file:
+      - ./ml/.env
+    ports:
+      - "5100:5000"
+    environment:
+      - PORT=5000
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5000/healthz').then(r=>r.json()).then(j=>process.exit(j.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
 
   redis:
     image: redis:7-alpine

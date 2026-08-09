@@ -6,6 +6,7 @@ export interface StoredMetadata {
   mimeType: string;
   chunkCount: number;
   model: string;
+  dim: number;
   storedAt: string;
 }
 
@@ -16,6 +17,7 @@ export async function storeMetadata(ctx: PipelineContext): Promise<StoredMetadat
     mimeType: ctx.type?.mimeType ?? 'application/octet-stream',
     chunkCount: ctx.chunks?.length ?? 0,
     model: ctx.ml?.model ?? 'unknown',
+    dim: ctx.ml?.dim ?? 0,
     storedAt: new Date().toISOString(),
   };
 

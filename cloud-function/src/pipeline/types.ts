@@ -47,7 +47,8 @@ export interface TextChunk {
 }
 
 export interface MlServiceResult {
-  embeddings: number[][];
+  chunkCount: number;
+  dim: number;
   model: string;
 }
 
