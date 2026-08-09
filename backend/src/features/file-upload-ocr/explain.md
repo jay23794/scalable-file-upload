@@ -1,19 +1,17 @@
-# Production File Upload + OCR + ML Pipeline (Interview Explanation)
+# File Upload + OCR Pipeline (Interview Explanation)
 
 ## Goal
 
-Keep the backend lightweight while supporting large file uploads and heavy AI processing. Nothing blocks the user, nothing blocks the API.
+Keep the API lightweight while supporting large file uploads and background OCR work. Nothing blocks the user, nothing blocks the API.
 
 ---
 
 ## 1. Upload — file never touches the backend
 
-The Angular frontend first asks the Express backend for a pre-signed S3 URL. The backend generates the URL, creates a unique `uploadId`, and returns both to the client.
-
-The frontend then uploads the file **directly to S3**. This means:
+The Angular frontend asks the Express backend for a pre-signed **Supabase Storage** URL. The backend generates the URL for a unique path and returns it. The frontend then PUTs the file **directly to storage**.
 
 - Backend bandwidth stays low
-- Large files (and multipart uploads) work naturally
+- Large files work naturally
 - No memory pressure on the backend
 
 ---
@@ -22,78 +20,89 @@ The frontend then uploads the file **directly to S3**. This means:
 
 Once the upload finishes, the frontend calls `POST /complete`. The backend:
 
-1. Validates the upload
-2. Inserts an `UploadRecord` in MongoDB with `status: pending`
-3. Enqueues a job into the **BullMQ `ocr-queue`** (stored in Redis)
-4. Immediately returns 202 to the client
+1. Inserts an `UploadRecord` in **MongoDB** with `status: 'pending'`
+2. Mints a short-lived signed **download URL** for the stored object
+3. Enqueues a job into the **BullMQ `ocr-queue`** (Redis) with `jobId = uploadId` so we can look the job up later by upload
+4. Returns the record to the client
 
-The API is fast and non-blocking. OCR and ML work happens elsewhere.
-
----
-
-## 3. OCR Worker — a separate ECS Fargate service
-
-The OCR Worker is a **BullMQ `Worker` on `ocr-queue`**, running as its own Fargate service. It:
-
-1. Streams the file directly from S3
-2. Detects the file type
-   - Text-based PDF → `pdf-parse` (fast, free)
-   - Scanned PDF / image → **AWS Textract**
-3. Cleans the extracted text and splits it into chunks
-4. Updates MongoDB (`ocr_done`, chunk count, summary)
-5. **Enqueues a new job into `ml-queue`** with the chunks
-
-The OCR worker never generates embeddings itself — Single Responsibility. It just hands off to the next queue.
+The API is fast and non-blocking. All OCR work happens elsewhere.
 
 ---
 
-## 4. ML Service — another independent ECS Fargate service (Python)
+## 3. OCR Worker (`cloud-function`) — separate process
 
-The ML Service is a **BullMQ `Worker` on `ml-queue`**. It:
+A standalone Node process (`cloud-function/`) runs a **BullMQ `Worker` on `ocr-queue`**. It runs the pipeline in one job:
 
-1. Computes vector embeddings for each chunk
-2. Writes vectors directly into **Milvus**
-3. Returns from the worker function (BullMQ auto-publishes `completed`)
+```
+download → detect → ocr → clean → chunk → store
+```
 
-**Milvus is owned entirely by the ML service.** The backend and OCR worker never touch it. Clean ownership = easier to scale and maintain each piece independently.
-
----
-
-## 5. Status flow — nobody "talks back"
-
-Every service only writes **forward**: to the next queue, or by returning from a worker. Nobody makes callbacks to the backend or the frontend.
-
-Progress reaches the user via BullMQ events, not direct calls:
-
-- OCR Worker calls `job.updateProgress({...})` and returns → BullMQ publishes `progress` / `completed` events to Redis.
-- ML Service does the same on `ml-queue`.
-- Backend has two `QueueEvents` subscribers — one on each queue — listening for `progress`, `completed`, `failed`.
-- When an event fires, the backend updates MongoDB **and** emits a Socket.IO event to the room `upload:${uploadId}`.
-- Frontend joined that room after upload, so it receives real-time updates: `"OCR Started"` → `"50%"` → `"OCR Finished"` → `"Embedding Started"` → `"Processing Complete"`.
+At each step it calls `job.updateProgress({ step, pct })`, which BullMQ publishes as a `progress` event on Redis. `storeMetadata` currently just logs the summary.
 
 ---
 
-## 6. Ownership boundaries (the important part)
+## 4. Status flow — sockets driven by BullMQ QueueEvents
+
+Nobody calls back to the backend or the frontend. Workers only write **forward**: they update job progress and return. Status reaches the user via events, not direct calls.
+
+- OCR worker calls `job.updateProgress(...)` and eventually returns → BullMQ publishes `active` / `progress` / `completed` / `failed` events on Redis.
+- Backend has a `QueueEvents` subscriber on **`ocr-queue`** (`infra/queueEvents.ts`) listening for those events.
+- On each event the backend:
+  - Updates the MongoDB status (`active → ocr_processing`, `completed → ready`, `failed → failed`)
+  - Emits a Socket.IO event to the room `upload:${uploadId}` (`ocr:progress`, `ocr:completed`, `ocr:failed`)
+- The frontend joined that room right after `/complete`, so it receives live updates: step name + percentage as the pipeline advances, and a completion / failure event at the end.
+
+On (re)subscribe the backend also **replays terminal state** — if the upload is already `ready` or `failed` when a client joins the room, it emits a synthetic `ocr:completed` / `ocr:failed` so a reconnecting client doesn't hang.
+
+---
+
+## 5. Sweeper — reconcile stuck uploads
+
+Because status lives in Mongo but the source of truth is BullMQ, they can drift (backend restart in the middle of a job, missed event, etc.). A periodic **sweeper** (`file-upload-ocr.sweeper.ts`) runs every 5 min and, for uploads still in-flight past a 10 min threshold:
+
+- If BullMQ says the job is healthy (`waiting`/`active`/`delayed`/...): leave it alone
+- If BullMQ says `completed`: mark Mongo `ready`
+- If BullMQ says `failed`: mark Mongo `failed`
+- Otherwise (job vanished): **re-enqueue** it
+
+This keeps the two stores in sync without any manual intervention.
+
+---
+
+## 6. Ownership boundaries
 
 | Component | Owns | Never touches |
 |---|---|---|
-| **Backend** | MongoDB status, Socket.IO fan-out, API layer | Milvus, OCR logic, embedding logic |
-| **OCR Worker** | Text extraction, chunking, enqueueing to `ml-queue` | Milvus, frontend, MongoDB write beyond OCR summary |
-| **ML Service** | Embeddings, Milvus writes | MongoDB, frontend, OCR logic |
+| **Backend (Express)** | MongoDB status, Socket.IO fan-out, API layer, sweeper | Storage object bytes, OCR logic |
+| **OCR Worker (`cloud-function`)** | Full pipeline (download, detect, extract, clean, chunk, store) | Frontend, Socket.IO, direct DB writes |
 
 Two rules fall out of this:
 
-- **Only the backend talks to the frontend.** Workers never emit sockets or call frontend APIs.
-- **Only the ML service writes to Milvus.** No race conditions on the vector store.
+- **Only the backend talks to the frontend.** The worker never emits sockets or calls a frontend/backend API.
+- **Workers report status by BullMQ events**, not direct calls. Backend translates those into Mongo writes + Socket.IO emits.
 
 ---
 
-## 7. Why this scales
+## 7. What's Wired Today
+
+- Presigned upload against **Supabase Storage**
+- `POST /complete` → Mongo `UploadRecord` + `ocr-queue` enqueue (`jobId = uploadId`)
+- `cloud-function` worker executes the pipeline: `download → detect → ocr → clean → chunk → store`
+- Per-step `job.updateProgress({ step, pct })`
+- Backend `QueueEvents` on `ocr-queue` (`active` / `progress` / `completed` / `failed`)
+- Mongo status transitions: `pending → ocr_processing → ready | failed`
+- Socket.IO server on the same HTTP port; rooms `upload:${uploadId}`
+- Terminal-state **replay** on late subscribe
+- Frontend `SocketService` + progress UI in `file-upload` component
+- Stuck-upload **sweeper** (every 5 min, 10 min threshold)
+
+---
+
+## 8. Why this scales
 
 Each component is independent, so we scale the bottleneck — not the whole system:
 
-- OCR slow? → Add more OCR worker tasks on Fargate.
-- Embedding slow? → Add more ML service tasks.
+- OCR slow? → Add more `cloud-function` worker instances.
 - Backend only handles API + sockets + orchestration → doesn't need heavy CPU, scales on connection count.
 
 BullMQ handles retries, backoff, and DLQ for us. Redis is the single transport for both jobs and status events.
@@ -102,9 +111,8 @@ BullMQ handles retries, backoff, and DLQ for us. Redis is the single transport f
 
 ## TL;DR
 
-- Frontend → S3 (direct, presigned)
-- Frontend → Backend (`/complete`) → **`ocr-queue`**
-- OCR Worker consumes `ocr-queue` → **`ml-queue`**
-- ML Service consumes `ml-queue` → **Milvus**
-- Backend listens to events on **both** queues → pushes updates to frontend via Socket.IO
-- Nobody calls anyone — everything is queues + events
+- Frontend → **Supabase Storage** (direct, presigned)
+- Frontend → Backend (`/complete`) → **MongoDB** + **`ocr-queue`**
+- `cloud-function` Worker consumes `ocr-queue` and runs the pipeline
+- Backend listens to `ocr-queue` `QueueEvents` → updates Mongo + pushes updates to the frontend via **Socket.IO** room `upload:${uploadId}`
+- A **sweeper** reconciles Mongo status against BullMQ job state
