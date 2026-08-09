@@ -1,5 +1,5 @@
 import { Schema, model, HydratedDocument } from 'mongoose';
-import { UploadRecord, UploadStatus } from './types';
+import { PipelineSummary, UploadRecord, UploadStatus } from './types';
 
 const UPLOAD_STATUSES: UploadStatus[] = [
   'pending',
@@ -13,6 +13,16 @@ interface UploadDoc extends Omit<UploadRecord, 'id'> {
   _id: string;
 }
 
+const PipelineSummarySchema = new Schema<PipelineSummary>(
+  {
+    chunkCount: { type: Number, required: true },
+    model:      { type: String, required: true },
+    dim:        { type: Number, required: true },
+    storedAt:   { type: Date,   required: true },
+  },
+  { _id: false },
+);
+
 const UploadSchema = new Schema<UploadDoc>(
   {
     _id: { type: String, required: true },
@@ -23,6 +33,7 @@ const UploadSchema = new Schema<UploadDoc>(
     status: { type: String, enum: UPLOAD_STATUSES, required: true, index: true },
     createdAt: { type: Date, required: true },
     updatedAt: { type: Date, required: true },
+    pipelineSummary: { type: PipelineSummarySchema, required: false },
   },
   { _id: false, versionKey: false },
 );
@@ -40,4 +51,5 @@ export const toRecord = (doc: HydratedDocument<UploadDoc>): UploadRecord => ({
   status: doc.status,
   createdAt: doc.createdAt,
   updatedAt: doc.updatedAt,
+  pipelineSummary: doc.pipelineSummary,
 });

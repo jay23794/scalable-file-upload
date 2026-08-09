@@ -1,4 +1,4 @@
-import { IN_FLIGHT_STATUSES, UploadRecord, UploadStatus } from './types';
+import { IN_FLIGHT_STATUSES, PipelineSummary, UploadRecord, UploadStatus } from './types';
 import { UploadModel, toRecord } from './file-upload-ocr.model';
 
 export class FileUploadOcrRepository {
@@ -27,6 +27,18 @@ export class FileUploadOcrRepository {
     const doc = await UploadModel.findByIdAndUpdate(
       id,
       { $set: { status, updatedAt: new Date() } },
+      { returnDocument: 'after' },
+    );
+    return doc ? toRecord(doc) : undefined;
+  }
+
+  async markReadyWithSummary(
+    id: string,
+    summary: PipelineSummary,
+  ): Promise<UploadRecord | undefined> {
+    const doc = await UploadModel.findByIdAndUpdate(
+      id,
+      { $set: { status: 'ready', pipelineSummary: summary, updatedAt: new Date() } },
       { returnDocument: 'after' },
     );
     return doc ? toRecord(doc) : undefined;

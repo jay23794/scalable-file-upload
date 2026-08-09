@@ -3,12 +3,32 @@ import { env } from '../config/env';
 import { ocrQueue, redisConnection } from './queue';
 import { getIo } from './io';
 import { fileUploadOcrService } from './container';
+import { PipelineSummary } from '../features/file-upload-ocr/types';
 
 let ocrQueueEvents: QueueEvents | undefined;
 
 async function resolveUploadId(jobId: string): Promise<string | undefined> {
   const job = await ocrQueue.getJob(jobId);
   return job?.data.uploadId;
+}
+
+export function parsePipelineSummary(raw: unknown): PipelineSummary | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r.chunkCount !== 'number' ||
+    typeof r.model !== 'string' ||
+    typeof r.dim !== 'number' ||
+    (typeof r.storedAt !== 'string' && !(r.storedAt instanceof Date))
+  ) {
+    return undefined;
+  }
+  return {
+    chunkCount: r.chunkCount,
+    model: r.model,
+    dim: r.dim,
+    storedAt: r.storedAt instanceof Date ? r.storedAt : new Date(r.storedAt),
+  };
 }
 
 export function startQueueEvents(): QueueEvents {
@@ -24,7 +44,14 @@ export function startQueueEvents(): QueueEvents {
     console.log(`[queue-events] job ${jobId} completed`, returnvalue);
     const uploadId = await resolveUploadId(jobId);
     if (!uploadId) return;
-    await fileUploadOcrService.markStatus(uploadId, 'ready');
+
+    const summary = parsePipelineSummary(returnvalue);
+    if (summary) {
+      await fileUploadOcrService.markReadyWithSummary(uploadId, summary);
+    } else {
+      console.warn(`[queue-events] job ${jobId} completed with unparseable returnvalue; marking ready without summary`);
+      await fileUploadOcrService.markStatus(uploadId, 'ready');
+    }
     getIo().to(`upload:${uploadId}`).emit('ocr:completed', returnvalue);
   });
 

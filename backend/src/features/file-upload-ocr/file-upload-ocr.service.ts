@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { JobState, Queue } from 'bullmq';
 import { FileUploadOcrRepository } from './file-upload-ocr.repository';
-import { UploadRecord, UploadStatus } from './types';
+import { PipelineSummary, UploadRecord, UploadStatus } from './types';
 import { CompleteUploadInput, PresignUploadInput } from './file-upload-ocr.schema';
 import { PresignedUpload, SupabaseStorageService } from '../../infra/storage';
 import { OcrJobData } from '../../infra/queue';
@@ -76,6 +76,13 @@ export class FileUploadOcrService {
     return this._repo.updateStatus(id, status);
   }
 
+  markReadyWithSummary(
+    id: string,
+    summary: PipelineSummary,
+  ): Promise<UploadRecord | undefined> {
+    return this._repo.markReadyWithSummary(id, summary);
+  }
+
   async getStatus(id: string): Promise<UploadStatus | undefined> {
     return (await this._repo.findById(id))?.status;
   }
@@ -95,5 +102,10 @@ export class FileUploadOcrService {
     const job = await this._ocrQueue.getJob(id);
     if (!job) return undefined;
     return job.getState();
+  }
+
+  async getJobReturnValue(id: string): Promise<unknown | undefined> {
+    const job = await this._ocrQueue.getJob(id);
+    return job?.returnvalue;
   }
 }

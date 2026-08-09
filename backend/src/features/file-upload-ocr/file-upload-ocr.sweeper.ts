@@ -1,5 +1,6 @@
 import { JobState } from 'bullmq';
 import { FileUploadOcrService } from './file-upload-ocr.service';
+import { parsePipelineSummary } from '../../infra/queueEvents';
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -39,7 +40,12 @@ export async function sweepStuckUploads(
     }
 
     if (state === 'completed') {
-      await service.markStatus(upload.id, 'ready');
+      const summary = parsePipelineSummary(await service.getJobReturnValue(upload.id));
+      if (summary) {
+        await service.markReadyWithSummary(upload.id, summary);
+      } else {
+        await service.markStatus(upload.id, 'ready');
+      }
       reconciled++;
       continue;
     }
