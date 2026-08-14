@@ -34,10 +34,10 @@ The API is fast and non-blocking. All OCR work happens elsewhere.
 A standalone Node process (`cloud-function/`) runs a **BullMQ `Worker` on `ocr-queue`**. It runs the pipeline in one job:
 
 ```
-download → detect → ocr → clean → chunk → store
+download → detect → ocr → clean → chunk → embed (ml) → store
 ```
 
-At each step it calls `job.updateProgress({ step, pct })`, which BullMQ publishes as a `progress` event on Redis. `storeMetadata` currently just logs the summary.
+At each step it calls `job.updateProgress({ step, pct })`, which BullMQ publishes as a `progress` event on Redis. The **embed** step is a sync HTTP `POST /embed` to the `ml` microservice, which encodes each chunk with a local ONNX model (`Xenova/all-MiniLM-L6-v2`, 384-dim) and upserts the vectors into the configured vector store (Supabase pgvector by default; Milvus/Zilliz as a pluggable fallback via `VECTOR_STORE`). `storeMetadata` currently just logs the summary — the vectors themselves are already persisted by the embed step.
 
 ---
 
@@ -73,8 +73,9 @@ This keeps the two stores in sync without any manual intervention.
 
 | Component | Owns | Never touches |
 |---|---|---|
-| **Backend (Express)** | MongoDB status, Socket.IO fan-out, API layer, sweeper | Storage object bytes, OCR logic |
-| **OCR Worker (`cloud-function`)** | Full pipeline (download, detect, extract, clean, chunk, store) | Frontend, Socket.IO, direct DB writes |
+| **Backend (Express)** | MongoDB status, Socket.IO fan-out, API layer, sweeper | Storage object bytes, OCR logic, vector store |
+| **OCR Worker (`cloud-function`)** | Full pipeline (download, detect, extract, clean, chunk, POST to ml, store summary) | Frontend, Socket.IO, direct DB writes, vector store |
+| **ML Service (`ml`)** | Text → 384-dim embedding, vector-store writes via the pluggable adapter | Redis, MongoDB, Socket.IO, frontend |
 
 Two rules fall out of this:
 
@@ -87,7 +88,7 @@ Two rules fall out of this:
 
 - Presigned upload against **Supabase Storage**
 - `POST /complete` → Mongo `UploadRecord` + `ocr-queue` enqueue (`jobId = uploadId`)
-- `cloud-function` worker executes the pipeline: `download → detect → ocr → clean → chunk → store`
+- `cloud-function` worker executes the pipeline: `download → detect → ocr → clean → chunk → embed → store`
 - Per-step `job.updateProgress({ step, pct })`
 - Backend `QueueEvents` on `ocr-queue` (`active` / `progress` / `completed` / `failed`)
 - Mongo status transitions: `pending → ocr_processing → ready | failed`
@@ -95,6 +96,8 @@ Two rules fall out of this:
 - Terminal-state **replay** on late subscribe
 - Frontend `SocketService` + progress UI in `file-upload` component
 - Stuck-upload **sweeper** (every 5 min, 10 min threshold)
+- **`ml` microservice** on :5100 — `POST /embed` (Xenova MiniLM-L6-v2, 384-dim), `GET /healthz`, `GET /debug/count`, `GET /debug/sample`
+- **Pluggable vector store** — `VectorStore` interface with Supabase (pgvector, default) and Milvus/Zilliz adapters, switched via `VECTOR_STORE` env; upsert keyed by `${uploadId}:${chunkIndex}` so BullMQ retries overwrite instead of duplicating
 
 ---
 
@@ -113,6 +116,6 @@ BullMQ handles retries, backoff, and DLQ for us. Redis is the single transport f
 
 - Frontend → **Supabase Storage** (direct, presigned)
 - Frontend → Backend (`/complete`) → **MongoDB** + **`ocr-queue`**
-- `cloud-function` Worker consumes `ocr-queue` and runs the pipeline
+- `cloud-function` Worker consumes `ocr-queue` and runs the pipeline; the embed step calls the **`ml` service**, which encodes chunks and upserts vectors into the active store (**Supabase pgvector** by default; Milvus/Zilliz as a pluggable fallback)
 - Backend listens to `ocr-queue` `QueueEvents` → updates Mongo + pushes updates to the frontend via **Socket.IO** room `upload:${uploadId}`
 - A **sweeper** reconciles Mongo status against BullMQ job state

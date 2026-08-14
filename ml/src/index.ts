@@ -20,6 +20,28 @@ app.get('/healthz', (_req: Request, res: Response) => {
   });
 });
 
+app.get('/debug/sample', async (req: Request, res: Response) => {
+  try {
+    const limit = Number(req.query.limit ?? 20);
+    const store = getVectorStore();
+    const rows = await store.sample(limit);
+    res.json({ store: store.name, count: rows.length, rows });
+  } catch (err) {
+    res.status(500).json({ error: 'sample failed', message: (err as Error).message });
+  }
+});
+
+app.get('/debug/count', async (req: Request, res: Response) => {
+  try {
+    const uploadId = typeof req.query.upload_id === 'string' ? req.query.upload_id : undefined;
+    const store = getVectorStore();
+    const count = await store.count(uploadId);
+    res.json({ store: store.name, collection: env.vectorStore.driver === 'milvus' ? env.milvus.collection : env.supabase.table, uploadId: uploadId ?? null, count });
+  } catch (err) {
+    res.status(500).json({ error: 'count failed', message: (err as Error).message });
+  }
+});
+
 app.use('/', embeddingsRouter);
 
 app.listen(env.port, () => {

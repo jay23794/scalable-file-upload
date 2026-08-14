@@ -7,8 +7,16 @@ export interface ChunkRow {
   created_at: number;
 }
 
+export interface VectorStoreSample {
+  pk: string;
+  upload_id: string;
+  chunk_index: number;
+}
+
 export interface VectorStore {
   readonly name: 'milvus' | 'supabase';
   init(): Promise<void>;
   upsert(rows: ChunkRow[]): Promise<void>;
+  count(uploadId?: string): Promise<number>;
+  sample(limit: number): Promise<VectorStoreSample[]>;
 }

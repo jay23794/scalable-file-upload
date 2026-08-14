@@ -1,6 +1,6 @@
-import { DataType, MilvusClient, RowData } from '@zilliz/milvus2-sdk-node';
+import { ConsistencyLevelEnum, DataType, MilvusClient, RowData } from '@zilliz/milvus2-sdk-node';
 import { env } from '../../config/env';
-import { ChunkRow, VectorStore } from './types';
+import { ChunkRow, VectorStore, VectorStoreSample } from './types';
 
 let clientInstance: MilvusClient | null = null;
 
@@ -56,9 +56,48 @@ export const milvusStore: VectorStore = {
   async upsert(rows: ChunkRow[]): Promise<void> {
     if (rows.length === 0) return;
     const client = getClient();
-    await client.upsert({
+    const res = await client.upsert({
       collection_name: env.milvus.collection,
       data: rows as unknown as RowData[],
     });
+    const code = res?.status?.error_code;
+    if (code && code !== 'Success') {
+      throw new Error(
+        `milvus upsert failed: ${code} ${res.status.reason ?? ''} ` +
+          `(collection=${env.milvus.collection}, rows=${rows.length})`
+      );
+    }
+    const affected = Number(res?.upsert_cnt ?? 0);
+    console.log(
+      `[milvus] upsert ok collection=${env.milvus.collection} rows=${rows.length} affected=${affected}`
+    );
+  },
+
+  async count(uploadId?: string): Promise<number> {
+    const client = getClient();
+    const res = await client.query({
+      collection_name: env.milvus.collection,
+      filter: uploadId ? `upload_id == "${uploadId}"` : '',
+      output_fields: ['count(*)'],
+      consistency_level: ConsistencyLevelEnum.Strong,
+    });
+    const row = res?.data?.[0] as Record<string, unknown> | undefined;
+    return Number(row?.['count(*)'] ?? 0);
+  },
+
+  async sample(limit: number): Promise<VectorStoreSample[]> {
+    const client = getClient();
+    const res = await client.query({
+      collection_name: env.milvus.collection,
+      filter: 'pk != ""',
+      output_fields: ['pk', 'upload_id', 'chunk_index'],
+      limit,
+      consistency_level: ConsistencyLevelEnum.Strong,
+    });
+    return (res?.data ?? []).map((r) => ({
+      pk: String(r.pk),
+      upload_id: String(r.upload_id),
+      chunk_index: Number(r.chunk_index),
+    }));
   },
 };
