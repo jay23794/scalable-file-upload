@@ -42,3 +42,5 @@ Thumbs.db
 
 # TypeScript incremental
 *.tsbuildinfo
+
+.claude
