@@ -3,6 +3,7 @@ import { FileUploadOcrService } from '../features/file-upload-ocr/file-upload-oc
 import { InternalService } from '../features/internal/internal.service';
 import { SupabaseStorageService } from './storage';
 import { ocrQueue } from './queue';
+import { embedQueue } from './embedQueue';
 
 const _fileUploadOcrRepository = new FileUploadOcrRepository();
 const _storage = new SupabaseStorageService();
@@ -11,6 +12,7 @@ export const fileUploadOcrService = new FileUploadOcrService(
   _fileUploadOcrRepository,
   _storage,
   ocrQueue,
+  embedQueue,
 );
 
 export const internalService = new InternalService(_storage);

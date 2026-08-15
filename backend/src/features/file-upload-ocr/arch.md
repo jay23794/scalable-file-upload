@@ -67,12 +67,16 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
         │                      pdf-parse            │
         │    cleanText                      (60%)   │
         │    chunkText                      (70%)   │
-        │    callMlService     → ML (stub)  (85%)   │
-        │    storeMetadata     → log (stub) (95%)   │
+        │    stageChunks       → Storage    (82%)   │
+        │    enqueueEmbedJob   → embed-q    (90%)   │
+        │    storeMetadata     → summary    (95%)   │
         │                                           │
         │  return meta   ─ BullMQ publishes         │
         │  throw err     ─ 'completed' / 'failed'   │
         │                  events to Redis          │
+        │                                           │
+        │  (ml embed happens async on embed-queue,  │
+        │   see "cf → ml Transport" design section) │
         └─────────┬─────────────────────────────────┘
                   │
                   │  6. BullMQ event stream (Redis)
@@ -137,7 +141,10 @@ Frontend            Backend            Supabase          Redis           Worker
    │                                                       extractText      │
    │                                                       cleanText        │
    │                                                       chunkText        │
-   │                                                       callMlService    │
+   │                                                       stageChunks      │
+   │                                                       (PUT chunks JSON → Storage via backend-minted signed URL)
+   │                                                       enqueueEmbedJob  │
+   │                                                       (embedQueue.add → ml consumes async)
    │                                                       storeMetadata    │
    │                                                                        │
    │                                                       │  return meta   │
@@ -183,9 +190,11 @@ Emitted by the worker via `job.updateProgress(...)` and consumed by the backend'
 
 ```ts
 interface PipelineProgress {
-  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'ml' | 'store';
+  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'stage' | 'enqueue' | 'store';
   pct: number;
 }
+// Note: backend also synthesizes `{ step: 'embed', pct: 95 }` on ocr-queue completed
+// (before the ml worker picks up the embed job) and forwards it to the socket room.
 ```
 
 `runPipeline` accepts an optional `onProgress: (p: PipelineProgress) => void` callback so `handlers/process.ts` stays free of any BullMQ import — the worker injects `(p) => job.updateProgress(p)` at the call site.
@@ -216,14 +225,19 @@ Both services must agree on the following:
 
 | Var | Backend | Cloud-function | ml | Notes |
 |---|---|---|---|---|
-| `REDIS_URL` | `redis://localhost:6379` | `redis://localhost:6379` | — | Must point to the same Redis |
-| `OCR_QUEUE_NAME` | `ocr-queue` | `ocr-queue` | — | Must match exactly |
-| `WORKER_CONCURRENCY` | — | `5` | — | Cloud-function only |
+| `REDIS_URL` | `redis://localhost:6379` | `redis://localhost:6379` | `redis://localhost:6379` | All three must point to the same Redis |
+| `OCR_QUEUE_NAME` | `ocr-queue` | `ocr-queue` | — | Must match |
+| `EMBED_QUEUE_NAME` | `embed-queue` | `embed-queue` | `embed-queue` | Must match |
+| `WORKER_CONCURRENCY` | — | `5` | — | Cloud-function OCR workers |
+| `EMBED_WORKER_CONCURRENCY` | — | — | `2` | ml embed workers per process |
 | `PORT` | `3000` | `4000` | `5100` | Independent (ml avoids macOS AirPlay squatting :5000) |
-| `ML_SERVICE_URL` | — | `http://localhost:5100` (compose: `http://ml:5000`) | — | Where the worker POSTs `/embed` |
+| `BACKEND_BASE_URL` | — | `http://localhost:3000` | `http://localhost:3000` | Where cf/ml call `/internal/signed-url` |
+| `INTERNAL_SERVICE_TOKEN` | required | required | required | Shared bearer for backend ↔ cf/ml. Rotate per env. |
+| `CHUNKS_DOWNLOAD_TTL_SECONDS` | `1800` | — | — | TTL for chunks/ signed download URLs (30 min default) |
+| `SUPABASE_URL` | Supabase project URL | — | Supabase project URL | Backend needs it for file storage; ml needs it for pgvector |
+| `SUPABASE_SERVICE_ROLE_KEY` | required | — | required | Server-side only, bypasses RLS. **ml never accesses Storage — only pgvector**. |
+| `SUPABASE_BUCKET` | required | — | — | Bucket for uploaded files and staged chunks (chunks live under `chunks/` prefix) |
 | `VECTOR_STORE` | — | — | `supabase` (default) or `milvus` | ml only — picks which adapter to boot |
-| `SUPABASE_URL` | — | — | Supabase project URL | Required when `VECTOR_STORE=supabase` |
-| `SUPABASE_SERVICE_ROLE_KEY` | — | — | Supabase service_role key | Required when `VECTOR_STORE=supabase` — server-side only, bypasses RLS |
 | `SUPABASE_TABLE` | — | — | `document_chunks` | Table must exist — run `ml/sql/supabase_init.sql` once |
 | `ZILLIZ_URI` | — | — | Zilliz Serverless endpoint | Only when `VECTOR_STORE=milvus` |
 | `ZILLIZ_TOKEN` | — | — | Zilliz API token | Only when `VECTOR_STORE=milvus` — never leaves the ml container |
@@ -348,16 +362,14 @@ The sweeper runs a **two-stage filter**: a cheap DB scan flags candidates, then 
                            │     (only when re-enqueued)
                            ▼
    ┌──────────────────────────────────────────────────────────┐
-   │  OCR Worker (or ML Service) picks up the job             │
+   │  Worker picks up the re-enqueued job                     │
    │                                                          │
-   │    status = await Mongo.getStatus(uploadId)              │
-   │                                                          │
-   │    if (status === 'ready')       → return (done)         │
-   │    if (status === 'ocr_done')    → skip OCR,             │
-   │                                    enqueue ml-queue      │
-   │    if (status === 'pending')     → run full pipeline     │
-   │                                                          │
-   │  Workers re-check status → skip already-completed steps  │
+   │  BullMQ jobId = uploadId dedupe:                         │
+   │    - if the "original" job still exists in the queue,    │
+   │      the re-add is a silent no-op                        │
+   │    - if not, the re-added job runs; upserts to Mongo     │
+   │      + vector store are idempotent (keyed by uploadId    │
+   │      and uploadId:chunkIndex)                            │
    └──────────────────────────────────────────────────────────┘
 
               Rule: If it's not in MongoDB, it didn't happen.
@@ -367,10 +379,10 @@ The sweeper runs a **two-stage filter**: a cheap DB scan flags candidates, then 
 
 ### Recovery sweeper
 
-A scheduled job runs every **5 minutes** on the backend. Stage 1 finds candidates stuck by the clock; stage 2 asks BullMQ what actually happened to each job before acting:
+A scheduled job runs every **5 minutes** on the backend. Stage 1 finds candidates stuck by the clock; stage 2 picks **which queue to ask** based on the record's status, then asks BullMQ what actually happened before acting:
 
 ```ts
-// runs every 5m (cron / BullMQ repeatable)
+// runs every 5m
 const HEALTHY = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'];
 
 const cutoff = new Date(Date.now() - 10 * 60 * 1000);
@@ -380,17 +392,27 @@ const candidates = await Upload.find({
 });
 
 for (const upload of candidates) {
-  const job   = await ocrQueue.getJob(upload.uploadId);
-  const state = await job?.getState();   // stage 2 — ask the source of truth
+  const queue = upload.status === 'ml_processing' ? 'embed' : 'ocr';
+  const state = await service.getJobState(upload.id, queue);   // stage 2
 
-  if (state && HEALTHY.includes(state)) continue;                  // in backlog / running — skip
-  if (state === 'completed') { await Upload.markReady(upload.uploadId);  continue; }
-  if (state === 'failed')    { await Upload.markFailed(upload.uploadId); continue; }
+  if (state && HEALTHY.includes(state)) continue;
 
-  // state is undefined → job was lost from Redis — re-enqueue
-  await ocrQueue.add('process', buildJobData(upload), {
-    jobId: upload.uploadId,   // ← idempotent
-  });
+  if (queue === 'ocr') {
+    // ocr-queue reconciliation
+    if (state === 'completed') { await service.markStatus(upload.id, 'ml_processing'); continue; }
+    if (state === 'failed')    { await service.markStatus(upload.id, 'failed');        continue; }
+    await service.reenqueueOcr(upload);   // undefined → lost, re-enqueue
+  } else {
+    // embed-queue reconciliation
+    if (state === 'completed') {
+      const summary = parsePipelineSummary(await service.getJobReturnValue(upload.id, 'embed'));
+      if (summary) await service.markReadyWithSummary(upload.id, summary);
+      else         await service.markStatus(upload.id, 'ready');
+      continue;
+    }
+    if (state === 'failed')    { await service.markStatus(upload.id, 'failed'); continue; }
+    await service.reenqueueEmbed(upload);   // re-mints chunks/${uploadId}.json signed URL
+  }
 }
 ```
 
@@ -399,19 +421,21 @@ for (const upload of candidates) {
 - **`jobId: uploadId`** — BullMQ dedupes by jobId. Even if the state check races, a duplicate `add` while the original is still queued is a no-op.
 - **Stage-2 state check** — the sweeper never re-adds a job that BullMQ still knows about. A 10k-deep backlog produces silent, action-free sweeps; only truly-lost jobs get pushed back in.
 - **Terminal-state reconciliation** — if a job completed or failed while the backend was down, the sweeper fixes the record's status instead of blindly re-enqueueing.
-- **Workers re-check MongoDB status before doing work.** A replayed job whose upload is already `ocr_done` skips extraction and jumps straight to the ML enqueue step. Already `ready` → returns immediately.
+- **BullMQ `jobId: uploadId` dedup** catches most double-enqueue races — a duplicate `add` while the original is still queued or in-flight is a no-op. Terminal-state reconciliation runs first in the sweeper, so a completed job is never re-enqueued.
 - **Every pipeline step is idempotent** when keyed by `uploadId` (+ `chunkIndex` for vector-store writes). Re-running produces the same result.
 
 ### What this protects against
 
 | Scenario | Recovery path |
 |---|---|
-| Redis restarts and loses in-flight jobs | Stage-2 sees `undefined` → sweeper re-enqueues from MongoDB within 5–10 min |
-| Worker crashes after enqueueing to `ml-queue` but before updating Mongo | Next sweep: OCR job state is `completed` → status reconciled to `ocr_done`; ML job (if lost) re-enqueued |
-| Backend down when `completed` / `failed` event fired | Stage-2 finds terminal state → reconciles status without re-running the pipeline |
+| Redis restarts and loses in-flight jobs (ocr-queue) | Stage-2 sees `undefined` → sweeper re-enqueues from MongoDB within 5–10 min (`reenqueueOcr` mints fresh download URL) |
+| Redis restarts and loses in-flight jobs (embed-queue) | Sweeper `reenqueueEmbed` re-mints signed URL for `chunks/${uploadId}.json` and re-adds. If the chunks file itself is gone, ml throws `CHUNKS_MISSING` (permanent) → next sweep marks failed. |
+| Worker crashes after CF enqueues embed job but before ocr-queue completed event fires | Stage-2 finds ocr-queue state=`completed` → transitions upload to `ml_processing`; embed job continues normally |
+| Backend down when `completed` / `failed` event fired | Stage-2 (on either queue) finds terminal state → reconciles status without re-running the pipeline |
 | Deep queue backlog (10k jobs waiting) | Stage-2 sees `waiting` for every candidate → silent no-op sweep, no runaway re-adds |
-| Retries exhausted (`attempts: 3`) → job in failed set | Stage-2 sees `failed` → status marked `failed`; manual retry via admin endpoint |
-| Backend deploy while jobs in flight | Nothing lost — jobs continue on workers, events buffered in Redis, backend re-subscribes on boot |
+| Retries exhausted (`attempts: 3` ocr, `5` embed) → job in failed set | Stage-2 sees `failed` → status marked `failed`; manual retry via admin endpoint |
+| Signed URL expires between enqueue and ml pickup | ml classifies Supabase's expired-signature error → calls backend to re-mint → retries download once **in-band** (no BullMQ attempt consumed) |
+| Backend deploy while jobs in flight | Nothing lost — jobs continue on workers, events buffered in Redis, backend re-subscribes to both queues on boot |
 
 ### Rule of thumb
 
@@ -428,27 +452,34 @@ for (const upload of candidates) {
 - **MongoDB persistence** — `UploadRecord` is stored in Mongo via Mongoose. `_id` is the app-level UUID (no ObjectId), compound index on `{status, updatedAt}` powers the sweeper's stage-1 scan. Backend connects before `httpServer.listen` and disconnects on SIGINT/SIGTERM.
 - **Recovery sweeper implemented** (`file-upload-ocr.sweeper.ts`) — runs every 5 min, `STUCK_THRESHOLD_MS` = 10 min, stage-2 BullMQ state check per candidate (`waiting/active/... → skip`, `completed → mark ready`, `failed → mark failed`, `unknown → reenqueue` with a fresh signed URL).
 - **Graceful shutdown** — worker traps SIGINT/SIGTERM, drains in-flight jobs via `ocrWorker.close()` then `redisConnection.quit()`. Backend closes the HTTP server and disconnects Mongo.
-- **`callMlService`** — real `fetch(ML_SERVICE_URL + '/embed', { uploadId, chunks })`. Worker no longer holds any embeddings; response is `{ chunkCount, dim, model }`. Errors throw → BullMQ retries per policy.
-- **`ml` microservice** (`ml/`) — Node/Express on :5100 (avoids macOS AirPlay's :5000). Endpoints: `POST /embed`, `GET /healthz` (reports `modelReady`, `vectorStoreReady`, active driver), `GET /debug/count[?upload_id=]`, `GET /debug/sample?limit=`. Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model is pre-baked into the Docker image so container cold starts don't fetch from HuggingFace.
+- **Transport worker→ml — async BullMQ `embed-queue` with claim-check payload** (see [Design Decision](#design-decision-cf--ml-transport-sync-http--async-bullmq)):
+  - CF pipeline ends with `stage` (PUT chunks JSON to Supabase Storage via backend-minted signed upload URL) and `enqueue` (add job to `embed-queue` with `{ uploadId, chunksPath, chunksSignedUrl }`).
+  - ml consumes the embed job, downloads chunks via `chunksSignedUrl`, embeds, upserts to the vector store, deletes the staged chunks file, and returns `{ chunkCount, dim, model, storedAt }` as the pipeline summary.
+  - `embed-queue`: `attempts: 5`, exp backoff (~32s cap), `removeOnComplete: 1000`, `removeOnFail: 5000`.
+  - Permanent failures (`CHUNKS_MISSING`, `INVALID_INPUT`) are marked with `permanent: true` and surfaced via BullMQ `UnrecoverableError` → no retries wasted.
+- **Backend `/internal/signed-url`** (`backend/src/features/internal/`) — bearer-token auth (`INTERNAL_SERVICE_TOKEN`), accepts `{ path, mode: 'upload' | 'download' | 'delete' }`, enforces `chunks/` path prefix. Sole surface through which cf and ml touch Supabase Storage.
+- **ml signed-URL fallback** (`ml/src/infra/supabaseErrors.ts` + `backendClient.ts`) — on chunks download failure, ml calls `classifyStorageError` and, only if the response is Supabase's expired-signature error, calls backend to re-mint a fresh URL and retries the download **in-band** (does not consume a BullMQ attempt). Any other 4xx/5xx throws normally.
+- **`ml` microservice** (`ml/`) — split into two processes: HTTP server on :5100 (`GET /healthz`, `GET /debug/count[?upload_id=]`, `GET /debug/sample?limit=`, retained `POST /embed` for debug) and BullMQ Worker on `embed-queue` (`npm run worker`). Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model + vector store warm up before the worker starts consuming (`autorun: false`).
 - **Pluggable vector store** — `ml/src/infra/vectorstore/` exposes a `VectorStore` interface (`init`, `upsert`, `count`, `sample`) with two adapters, selected at boot via `VECTOR_STORE`:
   - **Supabase (`supabase`, default)** — Postgres + pgvector. Table `document_chunks` (schema in `ml/sql/supabase_init.sql`: `pk text pk`, `upload_id`, `chunk_index`, `text`, `embedding vector(384)`, `created_at`; HNSW cosine index on `embedding`, btree on `upload_id`). Auth via `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS). `init()` verifies table reachability; schema itself is managed as a SQL migration, not created programmatically.
   - **Milvus / Zilliz (`milvus`)** — retained as a pluggable fallback. Collection `document_chunks` auto-created on first boot via `ensureCollection` (`pk`, `upload_id`, `chunk_index`, `text`, `embedding FloatVector(384)`, `created_at`; `AUTOINDEX` on embedding, `COSINE` metric). Upsert response's `error_code` is inspected — failures throw instead of silently succeeding.
   - Upserts in both adapters are keyed by `pk = "${uploadId}:${chunkIndex}"` → BullMQ retries produce overwrites, not duplicates.
   - Debug endpoints use strong consistency (Milvus `ConsistencyLevelEnum.Strong`; Supabase reads from primary) so counts always reflect the latest state, bypassing dashboard/preview lag.
-- **Transport worker→ml** — sync HTTP (`ML_SERVICE_URL/embed`). Chosen per arch line 563 ("Pattern 1 (Sync)") — swap to the async `ml-queue` pattern only when embed time bottlenecks OCR worker concurrency.
+- **Backend `QueueEvents` for both queues** (`backend/src/infra/queueEvents.ts`) — separate subscribers for `ocr-queue` and `embed-queue`. Mongo status transitions: `pending → ocr_processing (ocr active) → ml_processing (ocr completed / embed active) → ready (embed completed) | failed`. On ocr-queue completed, backend emits `ocr:progress {step:'embed', pct:95}`; on embed-queue completed, emits `ocr:completed` with the full summary. Frontend event contract (`ocr:progress` / `ocr:completed` / `ocr:failed`) unchanged.
+- **Sweeper for both queues** (`file-upload-ocr.sweeper.ts`) — branches on `record.status`: `ml_processing → check embed-queue`, else `check ocr-queue`. Split reconciliation: an OCR job stuck at `completed` advances to `ml_processing`; an embed job stuck at `completed` marks ready with summary. Reenqueue paths for both queues (embed reenqueue re-mints a signed URL from the deterministic `chunks/${uploadId}.json` path).
 
 ## What's Not Wired Yet
 
-- **`storeMetadata`** currently logs only — the *upload record* is in Mongo, but the *pipeline output summary* (chunk count, embedding model, dim, OCR text stats) is not persisted to Mongo yet. The embeddings themselves live in Milvus (correct) — only the summary write to Mongo is missing.
 - **Search endpoint on `ml`** (`POST /search`) — needed once the chatbot work starts. Same vector-store adapter + same encoder, deferred until then. Will add a `search(vector, limit)` method to the `VectorStore` interface (Supabase RPC using `<=>` cosine distance; Milvus `client.search`).
 - **Chatbot / RAG layer** — not started. Will call ml `/search` then hand top-k chunks to an LLM (Claude/OpenAI).
 - **Frontend poll fallback** — if a client is offline for the full lifetime of a job (past reconnect window and sweeper interval), the synthetic-replay branch covers most gaps, but a background `GET /uploads/:id` refresh on tab-focus would close the last window.
+- **Chunks-bucket lifecycle policy** — orphan chunk files (e.g. from an embed job that failed all 5 attempts and left the file undeleted) currently linger. A Supabase Storage lifecycle rule on the `chunks/` prefix (delete after 24h) would clean these up automatically. Small volume today; wire when it matters.
 
 ---
 
 ## Design Decision: cf → ml Transport (Sync HTTP → Async BullMQ)
 
-**Status**: planned. Current implementation is sync HTTP (`POST /embed`); target is an async BullMQ `embed-queue` with claim-check payloads staged in Supabase Storage.
+**Status**: **implemented**. The migration is live — CF stages chunks to Supabase Storage and enqueues to `embed-queue`; ml consumes and upserts. Sync `POST /embed` remains on ml as a debug escape hatch but is not part of the main flow.
 
 ### Why move off sync HTTP
 
@@ -666,13 +697,13 @@ Security      : KMS-encrypted S3, IAM roles on Fargate, VPC-only ElastiCache + M
 Secrets       : AWS Secrets Manager / SSM Parameter Store
 
 ────────────────────────────────────────────────────────────────────
-Alternative — Pattern 1 (Sync) — simpler starting point:
-  Replace the ml-queue with a direct HTTP call:
-    Worker → POST /embed on ML Service → wait for 200 OK → storeMetadata
-  Pros:  one queue, one completion event, easier to reason about.
-  Cons:  worker task blocked during embedding compute (30s-2min on big docs).
-  Migrate to the async ml-queue pattern (as drawn above) when ML compute
-  time starts bottlenecking OCR worker capacity.
+Historical note — Pattern 1 (Sync) was the initial implementation:
+  Worker → POST /embed on ML Service → wait for 200 OK → storeMetadata.
+  Migrated to the async embed-queue + claim-check pattern (drawn above)
+  once we started sizing for 500MB × 4-file uploads. See the
+  "cf → ml Transport" design decision earlier in this doc for the full
+  rationale. The sync POST /embed endpoint is retained on ml only as a
+  debug escape hatch, not part of the main flow.
 ────────────────────────────────────────────────────────────────────
 ```
 
@@ -682,9 +713,10 @@ Alternative — Pattern 1 (Sync) — simpler starting point:
 | Worker runtime | `npm run worker` on VPS | **ECS Fargate** tasks, autoscale on queue depth | >4 concurrent jobs sustained |
 | OCR — text PDFs | `pdf-parse` | `pdf-parse` (unchanged, ~free) | — |
 | OCR — scanned PDFs / images | `tesseract.js` | **AWS Textract** async API (`StartDocumentAnalysis`) | Quality complaints, or files >20 pages |
-| ML / embeddings | stub `callMlService` | **In-house ML Service** on ECS Fargate (Python) — computes embeddings and writes to Milvus directly | When real embeddings are needed |
-| Vector store | — | **Milvus** — owned by the ML service, worker never touches it | With the ML service |
-| ML → backend signalling | — | ML service **publishes `ml:done` on Redis pub/sub**; backend listens and pushes to Socket.IO | Same rollout as ML service |
+| ML / embeddings | Node ml service on VPS, BullMQ worker on `embed-queue` (Xenova MiniLM-L6-v2, 384-dim) | **In-house ML Service** on ECS Fargate (larger model or Python) — same queue shape, same claim-check pattern | Latency or model-quality limits of the Xenova ONNX runtime |
+| Vector store | Supabase pgvector (default) / Milvus (fallback) — owned by ml, worker never touches it | **Milvus / OpenSearch / Pinecone** — same `VectorStore` interface, swap the adapter | Scale or query-latency ceiling on pgvector |
+| ML → backend signalling | `embed-queue` `QueueEvents` `completed`/`failed` → backend markReady + Socket.IO fan-out | Same (BullMQ QueueEvents continues to work on ElastiCache) | — |
+| Chunks payload transport | Claim check: `chunks/${uploadId}.json` in Supabase Storage; queue carries signed URL | Claim check: `chunks/${uploadId}.json` in **S3**; queue carries signed URL (same pattern) | With S3 migration |
 
 | File storage | Supabase Storage | **S3** with lifecycle → Glacier after 30d | Storage cost >$100/month |
 | Status push | Socket.IO on backend | Socket.IO on backend (unchanged; single source of truth for FE) | — |

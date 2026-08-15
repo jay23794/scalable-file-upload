@@ -1,10 +1,12 @@
 import { randomUUID } from 'crypto';
 import { JobState, Queue } from 'bullmq';
+import { env } from '../../config/env';
 import { FileUploadOcrRepository } from './file-upload-ocr.repository';
 import { PipelineSummary, UploadRecord, UploadStatus } from './types';
 import { CompleteUploadInput, PresignUploadInput } from './file-upload-ocr.schema';
 import { PresignedUpload, SupabaseStorageService } from '../../infra/storage';
 import { OcrJobData } from '../../infra/queue';
+import { EmbedJobData } from '../../infra/embedQueue';
 
 const sanitizeFilename = (name: string): string =>
   name.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_');
@@ -17,15 +19,20 @@ const buildJobData = (record: UploadRecord, downloadUrl: string): OcrJobData => 
   downloadUrl,
 });
 
+const chunksPathFor = (uploadId: string): string => `chunks/${uploadId}.json`;
+
 export interface UploadRecordWithDownload extends UploadRecord {
   downloadUrl: string;
 }
+
+export type QueueKey = 'ocr' | 'embed';
 
 export class FileUploadOcrService {
   constructor(
     private _repo: FileUploadOcrRepository,
     private _storage: SupabaseStorageService,
     private _ocrQueue: Queue<OcrJobData>,
+    private _embedQueue: Queue<EmbedJobData>,
   ) {}
 
   async presignUpload(input: PresignUploadInput): Promise<PresignedUpload> {
@@ -91,21 +98,39 @@ export class FileUploadOcrService {
     return this._repo.findStuck(olderThan);
   }
 
-  async reenqueue(record: UploadRecord): Promise<void> {
+  async reenqueueOcr(record: UploadRecord): Promise<void> {
     const downloadUrl = await this._storage.createSignedDownloadUrl(record.path);
     await this._ocrQueue.add('process', buildJobData(record, downloadUrl), {
       jobId: record.id,
     });
   }
 
-  async getJobState(id: string): Promise<JobState | 'unknown' | undefined> {
-    const job = await this._ocrQueue.getJob(id);
+  async reenqueueEmbed(record: UploadRecord): Promise<void> {
+    const chunksPath = chunksPathFor(record.id);
+    const chunksSignedUrl = await this._storage.createSignedDownloadUrl(
+      chunksPath,
+      env.signedUrl.chunksDownloadTtlSeconds,
+    );
+    const data: EmbedJobData = {
+      uploadId: record.id,
+      chunksPath,
+      chunksSignedUrl,
+    };
+    await this._embedQueue.add('embed', data, { jobId: record.id });
+  }
+
+  private _queueFor(key: QueueKey): Queue<OcrJobData> | Queue<EmbedJobData> {
+    return key === 'ocr' ? this._ocrQueue : this._embedQueue;
+  }
+
+  async getJobState(id: string, queue: QueueKey): Promise<JobState | 'unknown' | undefined> {
+    const job = await this._queueFor(queue).getJob(id);
     if (!job) return undefined;
     return job.getState();
   }
 
-  async getJobReturnValue(id: string): Promise<unknown | undefined> {
-    const job = await this._ocrQueue.getJob(id);
+  async getJobReturnValue(id: string, queue: QueueKey): Promise<unknown | undefined> {
+    const job = await this._queueFor(queue).getJob(id);
     return job?.returnvalue;
   }
 }
