@@ -446,6 +446,93 @@ for (const upload of candidates) {
 
 ---
 
+## Design Decision: cf → ml Transport (Sync HTTP → Async BullMQ)
+
+**Status**: planned. Current implementation is sync HTTP (`POST /embed`); target is an async BullMQ `embed-queue` with claim-check payloads staged in Supabase Storage.
+
+### Why move off sync HTTP
+
+1. **OCR worker slot blocking** — the CF worker task is held for the full duration of ml encode + upsert. On a 500MB doc producing hundreds of chunks, embed can take 30s–2min. During that window the worker slot is unavailable for other OCR jobs, so **ml latency directly caps OCR throughput**.
+2. **Failure blast radius** — a transient ml hiccup fails the entire OCR job. BullMQ then retries the whole pipeline (download → detect → OCR → clean → chunk → embed) even though only the last step failed. Wasteful and slow, especially for large scanned PDFs where the OCR step is the expensive one.
+3. **No independent scaling** — ml sits behind sync HTTP with no queue-depth signal. Can't autoscale ml on backlog; can only guess from request rate.
+4. **No natural backpressure** — if ml slows down, CF workers accumulate open HTTP connections instead of jobs accumulating in a queue where they can be measured, drained, and prioritized.
+
+### Target architecture
+
+```
+CF worker (ocr-queue consumer)
+  download → detect → ocr → clean → chunk
+  → upload chunks JSON to Supabase Storage: chunks/${uploadId}.json
+  → embed-queue.add({ uploadId, chunksPath, signedUrl })
+  → ocr-queue job completed
+
+ml worker (embed-queue consumer)
+  → fetch chunks JSON via signedUrl (fallback: re-mint via backend if expired)
+  → encode + upsert to vector store
+  → delete chunks JSON
+  → embed-queue job completed
+```
+
+### Payload strategy — claim check via Supabase Storage
+
+For 500MB × 4 uploads, a single doc can produce hundreds of chunks with a total chunks-JSON payload of several MB. **Redis is not a payload store** — cramming multi-MB JSON into job data inflates memory, slows every queue op, and breaks introspection tools.
+
+**Claim-check pattern**: CF uploads chunks JSON to a dedicated `chunks/` prefix in Supabase Storage. The queue job carries a small pointer: `{ uploadId, chunksPath, signedUrl }`. ml downloads it, embeds, then deletes it. Redis only ever carries KB-sized job data regardless of doc size.
+
+### Signed-URL strategy — URL in queue, mint-on-demand fallback
+
+ml must not hold the Supabase service-role key (see [Security Boundary](#security-boundary)). Chunks are downloaded via signed URL, with a hybrid strategy to handle URL expiry mid-queue:
+
+1. CF requests a signed URL from backend (`POST /internal/signed-url`, service-token auth) with a generous TTL (30 min). URL goes in the queue payload.
+2. ml uses the URL directly. **Happy path: no extra backend hop.**
+3. On download failure, ml **classifies the error**:
+   - Supabase-specific expired-signature error → call `POST /internal/signed-url` for a fresh URL, retry download once in-band. Does **not** consume a BullMQ retry attempt.
+   - Any other 403 / 404 / network error → throw, let BullMQ retry per policy.
+
+**Error classification is critical**: a genuinely missing object must not trigger an infinite re-mint loop. ml parses the Supabase error body and only re-mints on the expiry-specific error code. One place, well-tested (`parseSupabaseStorageError` helper), so the retry logic doesn't drift.
+
+### Retry & error handling policy
+
+**embed-queue configuration**:
+- `attempts: 5` — higher than ocr-queue's 3 because embed has more transient failure modes: signed-URL expiry, model warm-up, vector-store rate limits.
+- `backoff: { type: 'exponential', delay: 2000 }` — caps around ~32s at attempt 5.
+- `removeOnComplete: 1000`, `removeOnFail: 5000` (mirrors ocr-queue).
+
+**Failure taxonomy**:
+
+| Failure | Retryable? | Handling |
+|---|---|---|
+| Signed URL expired | in-band | ml re-mints via backend, retries download; **does not consume a BullMQ attempt** |
+| Chunks file 404 / deleted | no | throw with `CHUNKS_MISSING` → fail permanent, alert |
+| Vector store transient (5xx, rate limit) | yes, up to 5 | throw → BullMQ backoff + retry |
+| Vector store auth failure (401/403) | no | throw with `CREDS_INVALID` → fail permanent, page ops |
+| Model encode failure | yes, up to 5 | throw → BullMQ backoff + retry (may be transient OOM / GC pressure) |
+| Chunk validation (empty, malformed) | no | throw with `INVALID_INPUT` → fail permanent |
+
+**Terminal reconciliation**: backend widens `QueueEvents` to subscribe to `embed-queue`. Mongo status transitions become:
+
+```
+pending → ocr_processing → ocr_done → embedding → ready | failed
+```
+
+The sweeper is extended to check both queues per candidate — stage-2 state check runs against whichever queue the record's current status implies is active (`ocr_processing` → `ocr-queue`, `embedding` → `embed-queue`).
+
+**Cleanup**: on `embed-queue completed`, ml deletes the staged chunks file. On terminal `failed` after all retries, the sweeper deletes it during reconciliation. Files are left in place while a job is still retryable so re-mints have something to fetch.
+
+### Tradeoffs accepted
+
+- **More moving parts** — second queue, second worker set, second progress source, more state transitions in Mongo. Bought with scaling + failure isolation.
+- **Extra I/O per job** — CF writes chunks to Storage; ml reads them back. For sub-MB payloads this is slower than the sync HTTP path. Worth it only because worst-case payloads are multi-MB and the failure/scaling wins are significant.
+- **Signed-URL error classification is fiddly** — two failure modes look identical to a naive HTTP client. Requires the `parseSupabaseStorageError` helper to stay reliable; without it, retry storms are one bug away.
+
+### Alternatives considered (not chosen)
+
+- **Long-TTL signed URL, no re-mint** — simplest, but TTL must exceed `retention + max_retries × max_backoff + buffer`. Bigger leak window and doesn't survive multi-hour queue delays.
+- **Pure mint-on-demand (no URL in payload)** — cleanest security story but adds one backend HTTP call per embed job unconditionally. Loses the happy-path optimization.
+- **Give ml Supabase Storage read/delete creds scoped to the `chunks/` prefix** — removes the signed-URL dance entirely, but widens ml's blast radius. Kept as a future option if signed-URL overhead ever becomes measurable.
+
+---
+
 ## Security Boundary
 
 - **Backend** is the only holder of the Supabase service-role key. It mints per-object signed URLs (`SupabaseStorageService.createSignedDownloadUrl`) and attaches them to job payloads.

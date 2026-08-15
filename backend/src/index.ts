@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import fileUploadOcrRoutes from './features/file-upload-ocr/file-upload-ocr.routes';
+import internalRoutes from './features/internal/internal.routes';
 import { startSweeper } from './features/file-upload-ocr/file-upload-ocr.sweeper';
 import { startQueueEvents } from './infra/queueEvents';
 import { initIo } from './infra/io';
@@ -19,6 +20,7 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 app.use('/api/v1/file-upload-ocr', fileUploadOcrRoutes);
+app.use('/internal', internalRoutes);
 
 const httpServer = createServer(app);
 const io = initIo(httpServer);

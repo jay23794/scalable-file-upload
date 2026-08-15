@@ -28,10 +28,11 @@ export class SupabaseStorageService {
     };
   }
 
-  async createSignedDownloadUrl(path: string): Promise<string> {
+  async createSignedDownloadUrl(path: string, ttlSeconds?: number): Promise<string> {
+    const ttl = ttlSeconds ?? env.signedUrl.downloadTtlSeconds;
     const { data, error } = await supabase.storage
       .from(this._bucket)
-      .createSignedUrl(path, env.signedUrl.downloadTtlSeconds);
+      .createSignedUrl(path, ttl);
 
     if (error || !data) {
       throw new Error(`Failed to create signed download URL: ${error?.message ?? 'unknown error'}`);
