@@ -5,9 +5,8 @@ export interface StoredMetadata {
   filename: string;
   mimeType: string;
   chunkCount: number;
-  model: string;
-  dim: number;
-  storedAt: string;
+  chunksPath: string;
+  stagedAt: string;
 }
 
 export async function storeMetadata(ctx: PipelineContext): Promise<StoredMetadata> {
@@ -16,9 +15,8 @@ export async function storeMetadata(ctx: PipelineContext): Promise<StoredMetadat
     filename: ctx.job.filename,
     mimeType: ctx.type?.mimeType ?? 'application/octet-stream',
     chunkCount: ctx.chunks?.length ?? 0,
-    model: ctx.ml?.model ?? 'unknown',
-    dim: ctx.ml?.dim ?? 0,
-    storedAt: new Date().toISOString(),
+    chunksPath: ctx.staged?.chunksPath ?? '',
+    stagedAt: new Date().toISOString(),
   };
 
   console.log('[cloud-function] storeMetadata', meta);

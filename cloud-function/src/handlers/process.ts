@@ -3,7 +3,8 @@ import { detectFileType } from '../pipeline/detectType';
 import { extractText } from '../pipeline/ocr';
 import { cleanText } from '../pipeline/cleanText';
 import { chunkText } from '../pipeline/chunkText';
-import { callMlService } from '../pipeline/callMlService';
+import { stageChunks } from '../pipeline/stageChunks';
+import { enqueueEmbedJob } from '../pipeline/enqueueEmbed';
 import { storeMetadata, StoredMetadata } from '../pipeline/storeMetadata';
 import { OnProgress, PipelineContext, PipelineJob } from '../pipeline/types';
 
@@ -28,8 +29,12 @@ export async function runPipeline(
   await onProgress?.({ step: 'chunk', pct: 70 });
   ctx.chunks = chunkText(ctx.cleaned);
 
-  await onProgress?.({ step: 'ml', pct: 85 });
-  ctx.ml = await callMlService(job.uploadId, ctx.chunks);
+  await onProgress?.({ step: 'stage', pct: 82 });
+  const staged = await stageChunks(job.uploadId, ctx.chunks);
+  ctx.staged = { chunksPath: staged.chunksPath };
+
+  await onProgress?.({ step: 'enqueue', pct: 90 });
+  await enqueueEmbedJob(job.uploadId, staged);
 
   await onProgress?.({ step: 'store', pct: 95 });
   return storeMetadata(ctx);

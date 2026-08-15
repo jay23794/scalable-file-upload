@@ -34,7 +34,7 @@ export interface ExtractedText {
 }
 
 export interface PipelineProgress {
-  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'ml' | 'store';
+  step: 'download' | 'detect' | 'ocr' | 'clean' | 'chunk' | 'stage' | 'enqueue' | 'store';
   pct: number;
 }
 
@@ -46,10 +46,8 @@ export interface TextChunk {
   tokens: number;
 }
 
-export interface MlServiceResult {
-  chunkCount: number;
-  dim: number;
-  model: string;
+export interface StagedChunksRef {
+  chunksPath: string;
 }
 
 export interface PipelineContext {
@@ -59,5 +57,5 @@ export interface PipelineContext {
   extracted?: ExtractedText;
   cleaned?: string;
   chunks?: TextChunk[];
-  ml?: MlServiceResult;
+  staged?: StagedChunksRef;
 }

@@ -27,6 +27,8 @@ services:
   cloud-function-api:
     build:
       context: ./cloud-function
+    env_file:
+      - ./cloud-function/.env
     ports:
       - "4000:4000"
     environment:
@@ -40,17 +42,18 @@ services:
   cloud-function-worker:
     build:
       context: ./cloud-function
+    env_file:
+      - ./cloud-function/.env
     command: ["node", "dist/worker.js"]
     environment:
       - REDIS_URL=redis://redis:6379
       - BACKEND_BASE_URL=http://backend:3000
-      - ML_SERVICE_URL=http://ml:5000
       - WORKER_CONCURRENCY=5
     depends_on:
       redis:
         condition: service_healthy
-      ml:
-        condition: service_healthy
+      backend:
+        condition: service_started
 
   ml:
     build:
