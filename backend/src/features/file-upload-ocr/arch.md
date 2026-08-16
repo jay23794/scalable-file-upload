@@ -11,8 +11,7 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
 | **Frontend (Angular)** | User picks file, gets a presigned URL, uploads directly to Supabase | 4200 | `cd frontend && npm start` |
 | **Backend API (Express)** | Issues presigned URLs, records uploads, enqueues OCR jobs | 3000 | `cd backend && npm run dev` |
 | **Redis** | Message broker (BullMQ queue `ocr-queue`) | 6379 | `docker run -d --name redis -p 6379:6379 redis:7-alpine` (first time) then `docker start redis` |
-| **Cloud Function — HTTP** | Health/introspection only | 4000 | `cd cloud-function && npm run dev` |
-| **Cloud Function — Worker** | BullMQ consumer running the pipeline | — | `cd cloud-function && npm run worker` |
+| **Cloud Function** | Single process: `/health` HTTP + BullMQ consumer on `ocr-queue` | 4000 | `cd cloud-function && npm run dev` |
 | **Supabase Storage** | File storage (external, managed) | — | — |
 | **ML Service** | Node/Express embeddings service (Xenova MiniLM-L6-v2, 384-dim), writes to a pluggable vector store | 5100 (avoids macOS AirPlay's :5000) | `cd ml && npm run dev` |
 | **Vector Store** | **Supabase (pgvector)** — table `document_chunks`, HNSW cosine index. Milvus/Zilliz retained as a pluggable fallback via `VECTOR_STORE` env. | — | — (managed) |
@@ -459,7 +458,7 @@ for (const upload of candidates) {
   - Permanent failures (`CHUNKS_MISSING`, `INVALID_INPUT`) are marked with `permanent: true` and surfaced via BullMQ `UnrecoverableError` → no retries wasted.
 - **Backend `/internal/signed-url`** (`backend/src/features/internal/`) — bearer-token auth (`INTERNAL_SERVICE_TOKEN`), accepts `{ path, mode: 'upload' | 'download' | 'delete' }`, enforces `chunks/` path prefix. Sole surface through which cf and ml touch Supabase Storage.
 - **ml signed-URL fallback** (`ml/src/infra/supabaseErrors.ts` + `backendClient.ts`) — on chunks download failure, ml calls `classifyStorageError` and, only if the response is Supabase's expired-signature error, calls backend to re-mint a fresh URL and retries the download **in-band** (does not consume a BullMQ attempt). Any other 4xx/5xx throws normally.
-- **`ml` microservice** (`ml/`) — split into two processes: HTTP server on :5100 (`GET /healthz`, `GET /debug/count[?upload_id=]`, `GET /debug/sample?limit=`, retained `POST /embed` for debug) and BullMQ Worker on `embed-queue` (`npm run worker`). Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model + vector store warm up before the worker starts consuming (`autorun: false`).
+- **`ml` microservice** (`ml/`) — single process on :5100: HTTP surface (`GET /healthz`, `GET /debug/count[?upload_id=]`, `GET /debug/sample?limit=`, retained `POST /embed` for debug) + BullMQ Worker on `embed-queue`. Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model + vector store warm up before the worker starts consuming (`autorun: false`); the ONNX model is loaded once and shared between the debug endpoint and the queue consumer.
 - **Pluggable vector store** — `ml/src/infra/vectorstore/` exposes a `VectorStore` interface (`init`, `upsert`, `count`, `sample`) with two adapters, selected at boot via `VECTOR_STORE`:
   - **Supabase (`supabase`, default)** — Postgres + pgvector. Table `document_chunks` (schema in `ml/sql/supabase_init.sql`: `pk text pk`, `upload_id`, `chunk_index`, `text`, `embedding vector(384)`, `created_at`; HNSW cosine index on `embedding`, btree on `upload_id`). Auth via `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS). `init()` verifies table reachability; schema itself is managed as a SQL migration, not created programmatically.
   - **Milvus / Zilliz (`milvus`)** — retained as a pluggable fallback. Collection `document_chunks` auto-created on first boot via `ensureCollection` (`pk`, `upload_id`, `chunk_index`, `text`, `embedding FloatVector(384)`, `created_at`; `AUTOINDEX` on embedding, `COSINE` metric). Upsert response's `error_code` is inspected — failures throw instead of silently succeeding.
@@ -825,7 +824,7 @@ IAM           : Least-privilege roles per Lambda / Fargate task
 |---|---|---|
 | Job queue | BullMQ `Queue` (`backend/src/infra/queue.ts`) | **SQS** standard queue + DLQ |
 | Job events (`completed`/`failed`/`progress`) | BullMQ `QueueEvents` | **EventBridge** rules + SNS fan-out, or **AppSync subscriptions** |
-| Worker runtime | Node BullMQ `Worker` (`cloud-function/src/worker.ts`) | **ECS Fargate** for long jobs, or **Lambda** for short (<15min) jobs, or **Step Functions** for >15min fan-out |
+| Worker runtime | Node BullMQ `Worker` (`cloud-function/src/index.ts`) | **ECS Fargate** for long jobs, or **Lambda** for short (<15min) jobs, or **Step Functions** for >15min fan-out |
 | Retries / backoff | BullMQ `defaultJobOptions` | SQS `maxReceiveCount` + Lambda destinations, or Step Functions retry state |
 | Presign / metadata API | Express on `:3000` | **API Gateway** + Lambda, or ECS Fargate behind ALB |
 | Status push to frontend | Socket.IO on Express | **API Gateway WebSocket** + Lambda + DynamoDB connection table |

@@ -1,9 +1,12 @@
 import express, { Request, Response } from 'express';
+import { Worker, UnrecoverableError } from 'bullmq';
 import { env } from './config/env';
+import { redisConnection } from './infra/redis';
 import { embeddingsRouter } from './features/embeddings/embeddings.routes';
 import { warmup } from './infra/embedder';
 import { readiness } from './infra/readiness';
 import { getVectorStore } from './infra/vectorstore';
+import { runEmbedJob, EmbedJobData } from './features/embeddings/embed-job';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -36,7 +39,12 @@ app.get('/debug/count', async (req: Request, res: Response) => {
     const uploadId = typeof req.query.upload_id === 'string' ? req.query.upload_id : undefined;
     const store = getVectorStore();
     const count = await store.count(uploadId);
-    res.json({ store: store.name, collection: env.vectorStore.driver === 'milvus' ? env.milvus.collection : env.supabase.table, uploadId: uploadId ?? null, count });
+    res.json({
+      store: store.name,
+      collection: env.vectorStore.driver === 'milvus' ? env.milvus.collection : env.supabase.table,
+      uploadId: uploadId ?? null,
+      count,
+    });
   } catch (err) {
     res.status(500).json({ error: 'count failed', message: (err as Error).message });
   }
@@ -45,25 +53,78 @@ app.get('/debug/count', async (req: Request, res: Response) => {
 app.use('/', embeddingsRouter);
 
 app.listen(env.port, () => {
-  console.log(`ml service listening on http://localhost:${env.port}`);
+  console.log(`[ml] http listening on http://localhost:${env.port}`);
+});
 
-  warmup()
-    .then(() => {
-      readiness.modelReady = true;
-      console.log(`embedding model loaded: ${env.embedding.model}`);
-    })
-    .catch((err) => {
-      console.error('embedding model failed to load:', err);
-    });
+export const embedWorker = new Worker<EmbedJobData>(
+  env.embedQueue.name,
+  async (job) => {
+    try {
+      return await runEmbedJob(job.data);
+    } catch (err) {
+      const e = err as Error & { permanent?: boolean };
+      if (e.permanent) {
+        throw new UnrecoverableError(e.message);
+      }
+      throw err;
+    }
+  },
+  {
+    connection: redisConnection,
+    concurrency: env.embedQueue.concurrency,
+    autorun: false,
+  },
+);
 
-  const store = getVectorStore();
-  store
+embedWorker.on('completed', (job) => {
+  console.log(`[ml] embed job ${job.id} completed`);
+});
+
+embedWorker.on('failed', (job, err) => {
+  console.error(`[ml] embed job ${job?.id} failed:`, err.message);
+});
+
+embedWorker.on('error', (err) => {
+  console.error('[ml] embed worker error:', err);
+});
+
+Promise.all([
+  warmup().then(() => {
+    readiness.modelReady = true;
+    console.log(`[ml] embedding model loaded: ${env.embedding.model}`);
+  }),
+  getVectorStore()
     .init()
     .then(() => {
       readiness.vectorStoreReady = true;
-      console.log(`vector store ready: ${store.name}`);
-    })
-    .catch((err) => {
-      console.error(`vector store init failed (${store.name}):`, err);
-    });
-});
+      console.log(`[ml] vector store ready: ${getVectorStore().name}`);
+    }),
+])
+  .then(() => {
+    embedWorker.run();
+    console.log(
+      `[ml] embed worker listening on "${env.embedQueue.name}" with concurrency ${env.embedQueue.concurrency}`,
+    );
+  })
+  .catch((err) => {
+    console.error('[ml] bootstrap failed:', err);
+  });
+
+let shuttingDown = false;
+const shutdown = async (signal: NodeJS.Signals) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[ml] ${signal} received, draining in-flight jobs...`);
+  try {
+    await embedWorker.close();
+    await redisConnection.quit();
+    console.log('[ml] shutdown complete');
+    process.exit(0);
+  } catch (err) {
+    console.error('[ml] shutdown error:', err);
+    process.exit(1);
+  }
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

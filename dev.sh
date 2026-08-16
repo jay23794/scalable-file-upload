@@ -57,8 +57,7 @@ start() {
 
 start ml         ml              dev
 start backend    backend         dev
-start cf-api     cloud-function  dev
-start cf-worker  cloud-function  worker
+start cf         cloud-function  dev
 start frontend   frontend        start
 
 echo ""
