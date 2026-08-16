@@ -50,7 +50,7 @@ The last two "real work" steps are the handoff to embedding:
 
 ## 4. Embedding Worker (`ml`) — separate process
 
-The `ml/` service is **also a BullMQ Worker**, consuming `embed-queue`. It runs on the same HTTP port as its debug/health endpoints (`/healthz`, `/debug/count`, `/debug/sample`) and still exposes `POST /embed` as a direct HTTP entry point, but the production path is the queue.
+The `ml/` service is **also a BullMQ Worker**, consuming `embed-queue`. It runs alongside a small HTTP surface used only for health and debugging (`/healthz`, `/debug/count`, `/debug/sample`); embedding is not exposed as an HTTP endpoint — the queue is the only entry point.
 
 For each embed job the worker:
 
@@ -144,7 +144,7 @@ Three rules fall out of this:
 - Terminal-state **replay** on late subscribe
 - Frontend `SocketService` + progress UI in `file-upload` component
 - Stuck-upload **sweeper** (every 5 min, 10 min threshold) covering both queues
-- **`ml` microservice** on :5100 — `GET /healthz`, `GET /debug/count`, `GET /debug/sample`, `POST /embed` (still exposed as a direct HTTP path, but the production route is the queue)
+- **`ml` microservice** on :5100 — `GET /healthz`, `GET /debug/count`, `GET /debug/sample` (embedding is queue-only, no HTTP endpoint)
 - **Pluggable vector store** — `VectorStore` interface with Supabase (pgvector, default) and Milvus/Zilliz adapters, switched via `VECTOR_STORE` env; upsert keyed by `${uploadId}:${chunkIndex}`
 - `UnrecoverableError` on malformed embed payloads so BullMQ skips retries
 - Signed-URL refresh: if the ml worker's chunks URL is expired at fetch time, it re-mints via the backend and retries once
