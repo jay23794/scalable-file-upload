@@ -42,7 +42,7 @@ At each step it calls `job.updateProgress({ step, pct })`, which BullMQ publishe
 The last two "real work" steps are the handoff to embedding:
 
 - **stage** — writes the chunk array as JSON to Supabase Storage at `chunks/${uploadId}.json`. Cloud-function does not hold Supabase credentials directly; it asks the backend for a short-lived signed upload URL via `POST /internal/signed-url` (authenticated with an internal service token), then PUTs the JSON to that URL.
-- **enqueue** — pushes an `embed` job into a **second BullMQ queue, `embed-queue`**, with `jobId = uploadId` and payload `{ uploadId, chunksPath, chunksSignedUrl }`.
+- **enqueue** — pushes a job into a **second BullMQ queue, `embed-queue`**, with job name `'embed'`, `jobId = uploadId`, and payload `{ uploadId, chunksPath, chunksSignedUrl }`.
 
 `storeMetadata` just logs a summary of the OCR job. The OCR worker never talks to the ml service directly and never writes vectors.
 
