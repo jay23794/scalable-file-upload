@@ -29,6 +29,16 @@ export const env = {
   embedQueue: {
     name: process.env.EMBED_QUEUE_NAME ?? 'embed-queue',
   },
+  generateQueue: {
+    name: process.env.GENERATE_QUEUE_NAME ?? 'generate-queue',
+  },
+  genStream: {
+    // Redis Stream retention for gen:{queryId}. Must agree with the ml service.
+    ttlSeconds: process.env.GEN_STREAM_TTL_SEC ? Number(process.env.GEN_STREAM_TTL_SEC) : 3600,
+  },
+  query: {
+    topKDefault: process.env.QUERY_TOPK_DEFAULT ? Number(process.env.QUERY_TOPK_DEFAULT) : 5,
+  },
   mongo: {
     uri: process.env.MONGODB_URI ?? 'mongodb://localhost:27017/feature',
   },
