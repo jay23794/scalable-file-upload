@@ -36,3 +36,18 @@ export async function encode(texts: string[]): Promise<number[][]> {
   }
   return vectors;
 }
+
+/**
+ * Injectable seam over the ONNX model. Services depend on this interface
+ * instead of importing `encode` directly, so a test can substitute a stub
+ * rather than loading ~90MB of model weights.
+ *
+ * Ingestion and query embeddings MUST come from the same model — mixing them
+ * produces vectors that are not comparable and retrieval returns noise. A
+ * single shared implementation is what enforces that.
+ */
+export interface Embedder {
+  encode(texts: string[]): Promise<number[][]>;
+}
+
+export const embedder: Embedder = { encode };

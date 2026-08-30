@@ -1,9 +1,5 @@
 import 'dotenv/config';
 
-type VectorStoreDriver = 'milvus' | 'supabase';
-
-const driver = (process.env.VECTOR_STORE ?? 'milvus') as VectorStoreDriver;
-
 const required = (key: string, value: string | undefined): string => {
   if (!value || value.trim() === '') {
     throw new Error(`Missing required env var: ${key}`);
@@ -13,14 +9,6 @@ const required = (key: string, value: string | undefined): string => {
 
 export const env = {
   port: process.env.PORT ? Number(process.env.PORT) : 5000,
-  vectorStore: {
-    driver,
-  },
-  milvus: {
-    uri: process.env.ZILLIZ_URI ?? '',
-    token: process.env.ZILLIZ_TOKEN ?? '',
-    collection: process.env.MILVUS_COLLECTION ?? 'document_chunks',
-  },
   supabase: {
     url: process.env.SUPABASE_URL ?? '',
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? '',

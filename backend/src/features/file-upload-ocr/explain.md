@@ -56,7 +56,7 @@ For each embed job the worker:
 
 1. Downloads the staged chunk JSON from the signed URL. If the URL has expired, it calls back to the backend (`POST /internal/signed-url` with mode `download`) to mint a fresh one and retries once.
 2. Validates the payload with Zod. Malformed payloads throw a `permanent` error, which is wrapped as a BullMQ `UnrecoverableError` so BullMQ won't retry.
-3. Encodes each chunk with a local ONNX model (`Xenova/all-MiniLM-L6-v2`, 384-dim) and upserts the vectors into the configured vector store (Supabase pgvector by default; Milvus/Zilliz as a pluggable fallback via `VECTOR_STORE`). Upsert key is `${uploadId}:${chunkIndex}` so retries overwrite instead of duplicating.
+3. Encodes each chunk with a local ONNX model (`Xenova/all-MiniLM-L6-v2`, 384-dim) and upserts the vectors into the Supabase pgvector store. Upsert key is `${uploadId}:${chunkIndex}` so retries overwrite instead of duplicating.
 4. Deletes the staged chunks blob (`POST /internal/signed-url` with mode `delete`) — best effort; a warning is logged on failure.
 5. Returns a `PipelineSummary` `{ chunkCount, model, dim, storedAt }` as the job's return value.
 
@@ -145,7 +145,7 @@ Three rules fall out of this:
 - Frontend `SocketService` + progress UI in `file-upload` component
 - Stuck-upload **sweeper** (every 5 min, 10 min threshold) covering both queues
 - **`ml` microservice** on :5100 — `GET /healthz`, `GET /debug/count`, `GET /debug/sample` (embedding is queue-only, no HTTP endpoint)
-- **Pluggable vector store** — `VectorStore` interface with Supabase (pgvector, default) and Milvus/Zilliz adapters, switched via `VECTOR_STORE` env; upsert keyed by `${uploadId}:${chunkIndex}`
+- **Vector store** — `VectorStore` interface backed by Supabase pgvector; upsert keyed by `${uploadId}:${chunkIndex}`, retrieval via `search()`
 - `UnrecoverableError` on malformed embed payloads so BullMQ skips retries
 - Signed-URL refresh: if the ml worker's chunks URL is expired at fetch time, it re-mints via the backend and retries once
 
@@ -168,6 +168,6 @@ BullMQ handles retries, backoff, and DLQ for us. Redis is the single transport f
 - Frontend → **Supabase Storage** (direct, presigned)
 - Frontend → Backend (`/upload/complete`) → **MongoDB** + **`ocr-queue`**
 - `cloud-function` Worker consumes `ocr-queue`, runs the OCR pipeline, stages chunks to Supabase (via `/internal/signed-url`), and enqueues an **`embed-queue`** job
-- `ml` Worker consumes `embed-queue`, downloads the staged chunks, encodes them, and upserts vectors into the active store (**Supabase pgvector** by default; Milvus/Zilliz as a pluggable fallback)
+- `ml` Worker consumes `embed-queue`, downloads the staged chunks, encodes them, and upserts vectors into **Supabase pgvector**
 - Backend listens to `QueueEvents` on **both** queues → updates Mongo (`pending → ocr_processing → ml_processing → ready | failed`) + pushes updates to the frontend via **Socket.IO** room `upload:${uploadId}`
 - A **sweeper** reconciles Mongo status against BullMQ job state on both queues

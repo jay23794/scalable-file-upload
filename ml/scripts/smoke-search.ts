@@ -7,7 +7,7 @@
 //                        to under-return if HNSW iterative scan is not enabled
 
 import { encode } from '../src/infra/embedder';
-import { getVectorStore } from '../src/infra/vectorstore';
+import { vectorStore } from '../src/infra/vectorstore';
 
 const TOP_K = Number(process.env.QUERY_TOPK_DEFAULT ?? 5);
 
@@ -19,10 +19,9 @@ async function main() {
     process.exit(1);
   }
 
-  const store = getVectorStore();
-  await store.init();
-  console.log(`store: ${store.name}`);
-  console.log(`total chunks: ${await store.count()}`);
+  await vectorStore.init();
+  console.log(`store: ${vectorStore.name}`);
+  console.log(`total chunks: ${await vectorStore.count()}`);
   console.log(
     `filter: ${uploadIds.length ? uploadIds.join(', ') : '(none — searching everything)'}`
   );
@@ -32,7 +31,7 @@ async function main() {
   const tEmbed = Date.now() - t0;
 
   const t1 = Date.now();
-  const hits = await store.search({ embedding, uploadIds, topK: TOP_K });
+  const hits = await vectorStore.search({ embedding, uploadIds, topK: TOP_K });
   const tSearch = Date.now() - t1;
 
   console.log(`\nembed: ${tEmbed}ms (includes model load) · search: ${tSearch}ms`);

@@ -1,6 +1,55 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { env } from '../../config/env';
-import { ChunkRow, SearchHit, SearchInput, VectorStore, VectorStoreSample } from './types';
+import { env } from '../config/env';
+
+// Supabase (Postgres + pgvector) is the vector store. The adapter indirection
+// that previously wrapped this — a driver switch plus a Milvus implementation —
+// was removed once Supabase became the committed choice.
+//
+// The VectorStore interface is retained deliberately: it is the seam that lets
+// services be constructed with a fake store in tests, and it keeps the
+// contract explicit if a second backend is ever needed.
+
+export interface ChunkRow {
+  pk: string;
+  upload_id: string;
+  chunk_index: number;
+  text: string;
+  embedding: number[];
+  created_at: number;
+}
+
+export interface VectorStoreSample {
+  pk: string;
+  upload_id: string;
+  chunk_index: number;
+}
+
+export interface SearchInput {
+  /** Query embedding — must come from the same model that produced the stored vectors. */
+  embedding: number[];
+  /** Restricts the search to these documents. Empty means search everything. */
+  uploadIds: string[];
+  topK: number;
+}
+
+/** A retrieved chunk. Carries `text` so callers never need a second lookup. */
+export interface SearchHit {
+  pk: string;
+  upload_id: string;
+  chunk_index: number;
+  text: string;
+  /** Cosine similarity in [-1, 1]; higher is closer. */
+  score: number;
+}
+
+export interface VectorStore {
+  readonly name: 'supabase';
+  init(): Promise<void>;
+  upsert(rows: ChunkRow[]): Promise<void>;
+  count(uploadId?: string): Promise<number>;
+  sample(limit: number): Promise<VectorStoreSample[]>;
+  search(input: SearchInput): Promise<SearchHit[]>;
+}
 
 let clientInstance: SupabaseClient | null = null;
 
@@ -16,7 +65,7 @@ function getClient(): SupabaseClient {
   return clientInstance;
 }
 
-export const supabaseStore: VectorStore = {
+export const vectorStore: VectorStore = {
   name: 'supabase',
 
   async init(): Promise<void> {

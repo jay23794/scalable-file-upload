@@ -14,7 +14,7 @@ End-to-end architecture for the file-upload-ocr feature. Backend accepts uploads
 | **Cloud Function** | Single process: `/health` HTTP + BullMQ consumer on `ocr-queue` | 4000 | `cd cloud-function && npm run dev` |
 | **Supabase Storage** | File storage (external, managed) | — | — |
 | **ML Service** | Node/Express embeddings service (Xenova MiniLM-L6-v2, 384-dim), writes to a pluggable vector store | 5100 (avoids macOS AirPlay's :5000) | `cd ml && npm run dev` |
-| **Vector Store** | **Supabase (pgvector)** — table `document_chunks`, HNSW cosine index. Milvus/Zilliz retained as a pluggable fallback via `VECTOR_STORE` env. | — | — (managed) |
+| **Vector Store** | **Supabase (pgvector)** — table `document_chunks`, HNSW cosine index, `match_document_chunks` search function | — | — (managed) |
 
 ---
 
@@ -236,11 +236,7 @@ Both services must agree on the following:
 | `SUPABASE_URL` | Supabase project URL | — | Supabase project URL | Backend needs it for file storage; ml needs it for pgvector |
 | `SUPABASE_SERVICE_ROLE_KEY` | required | — | required | Server-side only, bypasses RLS. **ml never accesses Storage — only pgvector**. |
 | `SUPABASE_BUCKET` | required | — | — | Bucket for uploaded files and staged chunks (chunks live under `chunks/` prefix) |
-| `VECTOR_STORE` | — | — | `supabase` (default) or `milvus` | ml only — picks which adapter to boot |
 | `SUPABASE_TABLE` | — | — | `document_chunks` | Table must exist — run `ml/sql/supabase_init.sql` once |
-| `ZILLIZ_URI` | — | — | Zilliz Serverless endpoint | Only when `VECTOR_STORE=milvus` |
-| `ZILLIZ_TOKEN` | — | — | Zilliz API token | Only when `VECTOR_STORE=milvus` — never leaves the ml container |
-| `MILVUS_COLLECTION` | — | — | `document_chunks` | Auto-created by ml on boot when using the milvus adapter |
 | `EMBEDDING_MODEL` | — | — | `Xenova/all-MiniLM-L6-v2` | HuggingFace id; ONNX weights pre-baked into ml image |
 | `EMBEDDING_DIM` | — | — | `384` | Must match the model output dim |
 
@@ -459,18 +455,17 @@ for (const upload of candidates) {
 - **Backend `/internal/signed-url`** (`backend/src/features/internal/`) — bearer-token auth (`INTERNAL_SERVICE_TOKEN`), accepts `{ path, mode: 'upload' | 'download' | 'delete' }`, enforces `chunks/` path prefix. Sole surface through which cf and ml touch Supabase Storage.
 - **ml signed-URL fallback** (`ml/src/infra/supabaseErrors.ts` + `backendClient.ts`) — on chunks download failure, ml calls `classifyStorageError` and, only if the response is Supabase's expired-signature error, calls backend to re-mint a fresh URL and retries the download **in-band** (does not consume a BullMQ attempt). Any other 4xx/5xx throws normally.
 - **`ml` microservice** (`ml/`) — single process on :5100: HTTP surface (`GET /healthz`, `GET /debug/count[?upload_id=]`, `GET /debug/sample?limit=`, retained `POST /embed` for debug) + BullMQ Worker on `embed-queue`. Uses `@xenova/transformers` to run `Xenova/all-MiniLM-L6-v2` locally (384-dim, ONNX, CPU-only). Model + vector store warm up before the worker starts consuming (`autorun: false`); the ONNX model is loaded once and shared between the debug endpoint and the queue consumer.
-- **Pluggable vector store** — `ml/src/infra/vectorstore/` exposes a `VectorStore` interface (`init`, `upsert`, `count`, `sample`) with two adapters, selected at boot via `VECTOR_STORE`:
+- **Vector store** — `ml/src/infra/vectorstore.ts` exposes a `VectorStore` interface (`init`, `upsert`, `count`, `sample`, `search`) backed by Supabase pgvector. The Milvus/Zilliz adapter and the `VECTOR_STORE` switch were removed once Supabase became the committed choice; the interface is retained as the seam that lets services be constructed with a fake store in tests:
   - **Supabase (`supabase`, default)** — Postgres + pgvector. Table `document_chunks` (schema in `ml/sql/supabase_init.sql`: `pk text pk`, `upload_id`, `chunk_index`, `text`, `embedding vector(384)`, `created_at`; HNSW cosine index on `embedding`, btree on `upload_id`). Auth via `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS). `init()` verifies table reachability; schema itself is managed as a SQL migration, not created programmatically.
-  - **Milvus / Zilliz (`milvus`)** — retained as a pluggable fallback. Collection `document_chunks` auto-created on first boot via `ensureCollection` (`pk`, `upload_id`, `chunk_index`, `text`, `embedding FloatVector(384)`, `created_at`; `AUTOINDEX` on embedding, `COSINE` metric). Upsert response's `error_code` is inspected — failures throw instead of silently succeeding.
-  - Upserts in both adapters are keyed by `pk = "${uploadId}:${chunkIndex}"` → BullMQ retries produce overwrites, not duplicates.
-  - Debug endpoints use strong consistency (Milvus `ConsistencyLevelEnum.Strong`; Supabase reads from primary) so counts always reflect the latest state, bypassing dashboard/preview lag.
+  - Upserts are keyed by `pk = "${uploadId}:${chunkIndex}"` → BullMQ retries produce overwrites, not duplicates.
+  - Debug endpoints read from the primary so counts always reflect the latest state, bypassing dashboard/preview lag.
+- **Vector search** — `VectorStore.search({ embedding, uploadIds, topK })` backed by the `match_document_chunks` Postgres function (`ml/sql/supabase_search.sql`), scoring with `1 - (embedding <=> query)` against the HNSW cosine index. Called in-process by the ml generate worker rather than over an HTTP `POST /search`, since the caller lives in the same process. The function sets `hnsw.iterative_scan = 'strict_order'`: pgvector applies the `WHERE upload_id = ANY(...)` filter *after* the index scan, so without it a narrow connector selection silently under-returns — measured at 1 row instead of 5 when filtering to 1 document out of 50.
 - **Backend `QueueEvents` for both queues** (`backend/src/infra/queueEvents.ts`) — separate subscribers for `ocr-queue` and `embed-queue`. Mongo status transitions: `pending → ocr_processing (ocr active) → ml_processing (ocr completed / embed active) → ready (embed completed) | failed`. On ocr-queue completed, backend emits `ocr:progress {step:'embed', pct:95}`; on embed-queue completed, emits `ocr:completed` with the full summary. Frontend event contract (`ocr:progress` / `ocr:completed` / `ocr:failed`) unchanged.
 - **Sweeper for both queues** (`file-upload-ocr.sweeper.ts`) — branches on `record.status`: `ml_processing → check embed-queue`, else `check ocr-queue`. Split reconciliation: an OCR job stuck at `completed` advances to `ml_processing`; an embed job stuck at `completed` marks ready with summary. Reenqueue paths for both queues (embed reenqueue re-mints a signed URL from the deterministic `chunks/${uploadId}.json` path).
 
 ## What's Not Wired Yet
 
-- **Search endpoint on `ml`** (`POST /search`) — needed once the chatbot work starts. Same vector-store adapter + same encoder, deferred until then. Will add a `search(vector, limit)` method to the `VectorStore` interface (Supabase RPC using `<=>` cosine distance; Milvus `client.search`).
-- **Chatbot / RAG layer** — not started. Will call ml `/search` then hand top-k chunks to an LLM (Claude/OpenAI).
+- **Chatbot / RAG layer** — in progress, see [real-time-query-process/arch.md](../real-time-query-process/arch.md). Retrieval and persistence are wired; the generate worker and its Gemini call are not yet.
 - **Frontend poll fallback** — if a client is offline for the full lifetime of a job (past reconnect window and sweeper interval), the synthetic-replay branch covers most gaps, but a background `GET /uploads/:id` refresh on tab-focus would close the last window.
 - **Chunks-bucket lifecycle policy** — orphan chunk files (e.g. from an embed job that failed all 5 attempts and left the file undeleted) currently linger. A Supabase Storage lifecycle rule on the `chunks/` prefix (delete after 24h) would clean these up automatically. Small volume today; wire when it matters.
 
@@ -567,7 +562,7 @@ The sweeper is extended to check both queues per candidate — stage-2 state che
 
 - **Backend** is the only holder of the Supabase service-role key. It mints per-object signed URLs (`SupabaseStorageService.createSignedDownloadUrl`) and attaches them to job payloads.
 - **Cloud-function worker** has no Supabase credentials whatsoever. It reads a signed URL from `job.data.downloadUrl` and fetches with global `fetch`. Even if the worker container is compromised, the attacker gets access only to the specific files currently in queue payloads, only for the URL's remaining TTL.
-- **ml service** is the only holder of vector-store credentials — currently `SUPABASE_SERVICE_ROLE_KEY` (Postgres admin, bypasses RLS); when `VECTOR_STORE=milvus`, `ZILLIZ_TOKEN` instead. Neither backend nor worker can talk to the vector store directly — they must go through the ml HTTP surface. Compromising the worker gives an attacker the ability to enqueue embed requests, not to read or wipe the vector store.
+- **ml service** is the only holder of vector-store credentials — `SUPABASE_SERVICE_ROLE_KEY` (Postgres admin, bypasses RLS). Neither backend nor worker can talk to the vector store directly — they must go through the ml HTTP surface. Compromising the worker gives an attacker the ability to enqueue embed requests, not to read or wipe the vector store.
 - **Tradeoff of embedding the URL in the payload**: it lives in Redis for the job's retention window (`removeOnComplete: 1000`, `removeOnFail: 5000`). Anyone with Redis read access can see and use those URLs until they expire. Acceptable on a private single-tenant Redis; if that changes, migrate to mint-on-demand (worker calls a backend `/internal/signed-url` endpoint per job). Do **not** ship the service-role key to the worker as a shortcut — that grants access to every object, not just the one being processed.
 
 ---
@@ -713,7 +708,7 @@ Historical note — Pattern 1 (Sync) was the initial implementation:
 | OCR — text PDFs | `pdf-parse` | `pdf-parse` (unchanged, ~free) | — |
 | OCR — scanned PDFs / images | `tesseract.js` | **AWS Textract** async API (`StartDocumentAnalysis`) | Quality complaints, or files >20 pages |
 | ML / embeddings | Node ml service on VPS, BullMQ worker on `embed-queue` (Xenova MiniLM-L6-v2, 384-dim) | **In-house ML Service** on ECS Fargate (larger model or Python) — same queue shape, same claim-check pattern | Latency or model-quality limits of the Xenova ONNX runtime |
-| Vector store | Supabase pgvector (default) / Milvus (fallback) — owned by ml, worker never touches it | **Milvus / OpenSearch / Pinecone** — same `VectorStore` interface, swap the adapter | Scale or query-latency ceiling on pgvector |
+| Vector store | Supabase pgvector — owned by ml, worker never touches it | **Milvus / OpenSearch / Pinecone** — same `VectorStore` interface, swap the adapter | Scale or query-latency ceiling on pgvector |
 | ML → backend signalling | `embed-queue` `QueueEvents` `completed`/`failed` → backend markReady + Socket.IO fan-out | Same (BullMQ QueueEvents continues to work on ElastiCache) | — |
 | Chunks payload transport | Claim check: `chunks/${uploadId}.json` in Supabase Storage; queue carries signed URL | Claim check: `chunks/${uploadId}.json` in **S3**; queue carries signed URL (same pattern) | With S3 migration |
 
@@ -832,7 +827,7 @@ IAM           : Least-privilege roles per Lambda / Fargate task
 | Object storage | Supabase Storage | **S3** with presigned URLs (same pattern as today) |
 | OCR | Tesseract / pdf-parse | **AWS Textract** (sync `AnalyzeDocument` or async `StartDocumentAnalysis`) |
 | Embeddings / ML | Python service (planned) | **Bedrock** (`InvokeModel` for embeddings) or **SageMaker** endpoint |
-| Vector storage | Milvus (planned) | **OpenSearch Serverless** with `knn` vectors, or **Pinecone** (managed, non-AWS) |
+| Vector storage | Supabase pgvector | **OpenSearch Serverless** with `knn` vectors, or **Pinecone** (managed, non-AWS) |
 | Config / secrets | `.env` files | **Systems Manager Parameter Store** or **Secrets Manager** |
 | Observability | `console.log` | **CloudWatch Logs**, **X-Ray** tracing, **CloudWatch Metrics** |
 

@@ -29,7 +29,7 @@ The system uses **Retrieval-Augmented Generation (RAG)** to retrieve relevant do
 | **MongoDB** | Source of truth for queries + generated answers (`generating` → `complete` / `failed`) | 27017 | `brew services start mongodb-community` |
 | **Redis** | Three roles: BullMQ `generate-queue`, Redis Stream token transport, response cache | 6379 | `docker start redis` |
 | **ML Service** | Query embedding, vector search, LLM inference, token streaming | 5000 | see note below |
-| **Vector Store** | Milvus or Supabase/pgvector — embeddings, text chunks, metadata (owned by ML service) | 19530 | — |
+| **Vector Store** | Supabase (pgvector) — embeddings, text chunks, metadata (owned by ML service) | — | — (managed) |
 | **LLM Provider** | Gemini / other — invoked by ML service with query + retrieved context | — | (external) |
 
 > **Note:** this doc assumes a Python ML service on `:5000`. The repo currently ships a **Node** ML service at `ml/` on `:5100` (`ml/package.json`). Reconcile before implementation — either extend the existing Node service or stand up a separate `ml-service/`.
@@ -80,7 +80,7 @@ The system uses **Retrieval-Augmented Generation (RAG)** to retrieve relevant do
                  search  ▼                               │
               ┌────────────────────────┐                 │
               │  Vector Store          │                 │
-              │  Milvus / pgvector     │                 │
+              │  Supabase pgvector     │                 │
               └────────────────────────┘                 │
                                                          │
   ═══════════════ TWO INDEPENDENT PATHS ═════════════════╪═══════════════════
@@ -348,7 +348,8 @@ Headers: Content-Type: text/event-stream
 | `MONGO_URI` | `mongodb://localhost:27017` | — | Backend is the only Mongo writer |
 | `GENERATE_QUEUE_NAME` | `generate-queue` | `generate-queue` | Must agree |
 | `GEN_STREAM_TTL_SEC` | `3600` | `3600` | Redis Stream retention |
-| `MILVUS_URI` | — | `http://localhost:19530` | ML-service only |
+| `SUPABASE_URL` | — | Supabase project URL | ML-service only — pgvector, never Storage |
+| `SUPABASE_SERVICE_ROLE_KEY` | — | (from Secrets Manager in prod) | ML-service only |
 | `LLM_API_KEY` | — | (from Secrets Manager in prod) | ML-service only |
 | `QUERY_TOPK_DEFAULT` | `5` | `5` | Must agree |
 | `PORT` | `3000` | `5000` | Independent |

@@ -1,6 +1,6 @@
 -- One-time Supabase setup for the ml vector store.
 -- Run this in the Supabase SQL editor (or via psql) before starting the ml
--- service with VECTOR_STORE=supabase.
+-- service.
 --
 -- Assumes 384-dim embeddings (Xenova/all-MiniLM-L6-v2). If EMBEDDING_DIM
 -- differs, change the vector(384) below to match.
