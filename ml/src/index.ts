@@ -6,6 +6,10 @@ import { warmup } from './infra/embedder';
 import { readiness } from './infra/readiness';
 import { vectorStore } from './infra/vectorstore';
 import { startEmbedWorker, stopEmbedWorker } from './features/embeddings/embeddings.worker';
+import {
+  startGenerateWorker,
+  stopGenerateWorker,
+} from './features/generation/generation.worker';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -69,6 +73,7 @@ Promise.all([
 ])
   .then(() => {
     startEmbedWorker();
+    startGenerateWorker();
   })
   .catch((err) => {
     console.error('[ml] bootstrap failed:', err);
@@ -80,7 +85,7 @@ const shutdown = async (signal: NodeJS.Signals) => {
   shuttingDown = true;
   console.log(`[ml] ${signal} received, draining in-flight jobs...`);
   try {
-    await stopEmbedWorker();
+    await Promise.all([stopEmbedWorker(), stopGenerateWorker()]);
     await redisConnection.quit();
     console.log('[ml] shutdown complete');
     process.exit(0);
