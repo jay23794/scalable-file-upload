@@ -1,6 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { env } from '../../config/env';
-import { ChunkRow, VectorStore, VectorStoreSample } from './types';
+import { ChunkRow, SearchHit, SearchInput, VectorStore, VectorStoreSample } from './types';
 
 let clientInstance: SupabaseClient | null = null;
 
@@ -64,6 +64,36 @@ export const supabaseStore: VectorStore = {
       pk: String(r.pk),
       upload_id: String(r.upload_id),
       chunk_index: Number(r.chunk_index),
+    }));
+  },
+
+  async search({ embedding, uploadIds, topK }: SearchInput): Promise<SearchHit[]> {
+    const client = getClient();
+    const { data, error } = await client.rpc('match_document_chunks', {
+      // pgvector's text input format is exactly what JSON.stringify produces for
+      // a number[] — "[0.1,0.2,...]". Sending a bare array leaves PostgREST to
+      // guess at the json -> vector cast; the string form always parses.
+      query_embedding: JSON.stringify(embedding),
+      match_count: topK,
+      // null (not []) means "no filter" to the SQL function. An empty array
+      // would match nothing.
+      filter_upload_ids: uploadIds.length > 0 ? uploadIds : null,
+    });
+
+    if (error) {
+      throw new Error(
+        `supabase search failed: ${error.message}. ` +
+          `If match_document_chunks is missing, run ml/sql/supabase_search.sql ` +
+          `in the Supabase SQL editor.`
+      );
+    }
+
+    return (data ?? []).map((r: Record<string, unknown>) => ({
+      pk: String(r.pk),
+      upload_id: String(r.upload_id),
+      chunk_index: Number(r.chunk_index),
+      text: String(r.text),
+      score: Number(r.score),
     }));
   },
 };

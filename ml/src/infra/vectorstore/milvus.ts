@@ -1,6 +1,21 @@
 import { ConsistencyLevelEnum, DataType, MilvusClient, RowData } from '@zilliz/milvus2-sdk-node';
 import { env } from '../../config/env';
-import { ChunkRow, VectorStore, VectorStoreSample } from './types';
+import { ChunkRow, SearchHit, SearchInput, VectorStore, VectorStoreSample } from './types';
+
+// Milvus filter expressions are strings, so upload IDs are interpolated. They
+// originate in a user request, so reject anything that could break out of the
+// quoted literal rather than trying to escape it — our IDs are UUIDs.
+const ID_PATTERN = /^[A-Za-z0-9_:-]+$/;
+
+function buildUploadIdFilter(uploadIds: string[]): string {
+  if (uploadIds.length === 0) return '';
+  for (const id of uploadIds) {
+    if (!ID_PATTERN.test(id)) {
+      throw new Error(`milvus search: unsafe upload_id '${id}'`);
+    }
+  }
+  return `upload_id in [${uploadIds.map((id) => `"${id}"`).join(', ')}]`;
+}
 
 let clientInstance: MilvusClient | null = null;
 
@@ -98,6 +113,36 @@ export const milvusStore: VectorStore = {
       pk: String(r.pk),
       upload_id: String(r.upload_id),
       chunk_index: Number(r.chunk_index),
+    }));
+  },
+
+  async search({ embedding, uploadIds, topK }: SearchInput): Promise<SearchHit[]> {
+    const client = getClient();
+    const res = await client.search({
+      collection_name: env.milvus.collection,
+      data: [embedding],
+      limit: topK,
+      filter: buildUploadIdFilter(uploadIds),
+      output_fields: ['pk', 'upload_id', 'chunk_index', 'text'],
+      metric_type: 'COSINE',
+    });
+
+    const code = res?.status?.error_code;
+    if (code && code !== 'Success') {
+      throw new Error(
+        `milvus search failed: ${code} ${res.status.reason ?? ''} ` +
+          `(collection=${env.milvus.collection}, topK=${topK})`
+      );
+    }
+
+    // COSINE metric returns similarity directly, matching the SQL function's
+    // 1 - (embedding <=> query) — no conversion needed.
+    return (res?.results ?? []).map((r) => ({
+      pk: String(r.pk),
+      upload_id: String(r.upload_id),
+      chunk_index: Number(r.chunk_index),
+      text: String(r.text),
+      score: Number(r.score),
     }));
   },
 };
