@@ -1,7 +1,7 @@
 # Real-Time Query Process — Implementation Handoff (Stages 4–7)
 
-Companion to [`arch.md`](./arch.md). Stages 1–4 are done; this document carries everything a fresh
-session needs to finish the feature. **Stage 5 is next.**
+Companion to [`arch.md`](./arch.md). Stages 1–6 are done — the whole backend is built. Only the
+frontend is left. **Stage 7 is next.**
 
 **Read `arch.md` first** — it is the source of truth for the design. This file records what was
 built, what was decided along the way, and what is left.
@@ -26,7 +26,9 @@ built, what was decided along the way, and what is left.
 | `9eecd07` | Stages 1–2 — contracts, `generate-queue`, Mongo persistence, `POST /queries` |
 | `5af7f0a` | Stage 3 — `VectorStore.search()` + `match_document_chunks` SQL function |
 | `fd3b4d2` | ml restructure, DI, Milvus removal |
-| *(uncommitted)* | Stage 4 — generate worker, `llm.ts` adapter, `generation/` slice |
+| `6d5d54e` | Stage 4 — generate worker, `llm.ts` adapter, `generation/` slice |
+| `5fd30e4` | Stage 5 — Path A, `wireGenerateEvents` + `smoke-path-a.ts` |
+| *(uncommitted)* | Stage 6 — Path B, `real-time-query-process.stream.ts` |
 
 ### Backend — working and verified against a live server
 
@@ -163,43 +165,66 @@ cancelled rather than merely abandoned.
 
 The happy path past the search step is unverifiable until Supabase and `LLM_API_KEY` are restored.
 
-## 6. Stages 5–7
+## 6. Stages 5–6 (BUILT) and Stage 7
 
-### Stage 5 — Path A (durability)
+### Stage 5 — Path A, durability (BUILT — `5fd30e4`)
 
-`backend/src/infra/queueEvents.ts` — add `wireGenerateEvents()` and a third `QueueEvents` instance
-in `startQueueEvents()`, beside the existing OCR and embed handlers.
+`backend/src/infra/queueEvents.ts` gained `parseGenerationResult()`, `wireGenerateEvents()`, and a
+third `QueueEvents` instance in `startQueueEvents()`. `wireOcrEvents` and `wireEmbedEvents` are
+byte-identical — the change is purely additive.
 
-- Add `parseGenerationResult(raw: unknown)` — a runtime type guard mirroring the existing
-  `parsePipelineSummary`. The return value crosses a process boundary as JSON and arrives `unknown`.
-- `.on('completed')` → `realTimeQueryProcessService.markComplete(jobId, result)`
-- `.on('failed')` → `markFailed(jobId, failedReason)`
-- **No Socket.IO emit** — unlike the OCR handlers. This feature's live view is SSE, and the SSE
-  handler reads Redis directly.
+Two deliberate differences from the OCR and embed handlers:
 
-✅ **Verify:** Mongo flips `generating` → `complete` with text and sources **with no browser open at
-any point**. That is the requirement the whole design exists for.
+- **No Socket.IO emit.** The live view is SSE, and that handler tails Redis directly. Emitting here
+  would be a second, competing delivery path for the same data.
+- **No `resolveUploadId()` round trip.** `jobId === queryId === Mongo _id`, so the id in hand is
+  already the one to write against.
 
-### Stage 6 — Path B (the SSE endpoint)
+**Unparseable return value fails the query** rather than falling back to "mark it done anyway" the
+way the embed handler does. There, losing the return value costs a status detail; here the return
+value *is* the answer, and a complete row with no text is an empty bubble that never resolves.
 
-New file `real-time-query-process.stream.ts`, wired as `GET /queries/:id/stream`. Strictly read-only.
+✅ **Verified** by `backend/scripts/smoke-path-a.ts` — a fake worker on `generate-queue` stands in
+for the ml service, so it needs neither Supabase nor a Gemini key (it does need live Mongo + Redis):
 
-1. Load the record. If `status !== 'generating'`, emit one terminal frame from stored Mongo data and
-   close — do not tail a stream with nothing left to say. Emitting a `done`-shaped frame (rather than
-   plain JSON) keeps the client on a single code path.
-2. Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`,
-   `Connection: keep-alive`, `X-Accel-Buffering: no`, then `res.flushHeaders()`.
-3. Cursor from the `Last-Event-ID` header, default `'0'` (full replay — cheap and correct at V1).
-4. **`redisConnection.duplicate()`** — a blocking `XREAD` monopolises its connection and must never
-   use the shared one from `infra/queue.ts`.
-5. Loop `XREAD BLOCK 15000 STREAMS gen:{id} <cursor>`: write `id: <entryId>\ndata: <json>\n\n` per
-   entry, advance the cursor; on an empty read write `: keepalive\n\n`; exit on
-   `done` / `error` / `cancelled`.
-6. **Tear down the duplicate connection in both `req.on('close')` and a `finally`.** A leaked
-   blocking connection per abandoned browser tab is a real exhaustion path.
+1. valid result → row flips `generating` → `complete` with text, sources, tokens, finishReason,
+   **with no browser open at any point**
+2. malformed result → `failed`, not `complete`
+3. worker throws → `failed` carrying the real `failedReason`
 
-✅ **Verify:** `curl -N .../queries/{id}/stream` prints frames progressively. Kill it mid-stream and
-confirm Mongo still reaches `complete`.
+### Stage 6 — Path B, the SSE endpoint (BUILT — uncommitted)
+
+`real-time-query-process.stream.ts`, wired as `GET /queries/:id/stream`. Strictly read-only — it
+never writes to Mongo.
+
+Built as specified: terminal short-circuit when `status !== 'generating'`, the four headers plus
+`flushHeaders()`, cursor from `Last-Event-ID` defaulting to `'0'`, `redisConnection.duplicate()` for
+the blocking `XREAD BLOCK 15000`, keepalive comments on idle reads, and teardown in **both**
+`req.on('close')` and a `finally`.
+
+Three details worth knowing, all beyond the original sketch:
+
+- **`disconnect()`, not `quit()`, on teardown.** `quit()` waits for in-flight commands, and the
+  in-flight command is an `XREAD` parked for up to 15s. `quit()` would hold the connection for the
+  rest of the block window on every closed tab — the exact leak the teardown exists to prevent.
+- **A finished query replays as `token` + `done`, not a bare `done`.** A client that opens the
+  stream microseconds after completion would otherwise get a terminal frame with no text and render
+  an empty message. Two frames keep it on one code path *and* give it something to draw.
+- **After 4 consecutive idle reads (~60s) the handler re-checks Mongo.** If Path A has since
+  finished the query, it closes the client out from the durable record. Without this, a stream that
+  went permanently silent — worker died before writing a terminal event, or the stream hit its TTL —
+  leaves the client tailing forever while holding a blocking Redis connection.
+
+✅ **Verified** against a live backend with a hand-seeded stream (no ml worker needed):
+
+| Case | Result |
+|---|---|
+| Live tail, `curl -N` | frames arrive 400ms apart, matching the seed cadence — not one buffered blob |
+| `Last-Event-ID` resume | replays only entries after the cursor |
+| Already-`complete` query | `token` + `done` in 0.01s, no tailing |
+| Unknown id | `404` |
+| Silent stream | `: keepalive` at 15/30/45s, then closes from Mongo at 60s |
+| 3 tabs opened and abandoned | Redis `connected_clients` 7 → 11 → **7**. No leaked connections. |
 
 ### Stage 7 — frontend
 
