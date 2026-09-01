@@ -23,7 +23,6 @@ import { MatButtonModule } from '@angular/material/button';
   styleUrl: './app.scss'
 })
 export class App {
-  protected readonly title = signal('my-feature');
   protected readonly sidenavOpen = signal(true);
 
   toggleSidenav() {

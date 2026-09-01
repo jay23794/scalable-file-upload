@@ -1,4 +1,7 @@
 .file-upload-card {
+  // flex: none keeps the card at its natural height now that .app-content is a
+  // flex column, rather than letting it squash to fit.
+  flex: none;
   max-width: 720px;
   margin: 24px auto;
 }

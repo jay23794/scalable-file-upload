@@ -1,29 +1,134 @@
-<mat-card class="chat-card">
-  <mat-card-header>
-    <mat-card-title>Real-time Chat</mat-card-title>
-    <mat-card-subtitle>Query and process your data</mat-card-subtitle>
-  </mat-card-header>
+<section class="chat">
+  <div class="messages" #scrollContainer>
+    @if (loading()) {
+      <div class="notice">Loading your history…</div>
+    } @else if (loadError()) {
+      <div class="notice error">{{ loadError() }}</div>
+    } @else if (messages().length === 0) {
+      <div class="empty">
+        <mat-icon>forum</mat-icon>
+        <p>Ask me anything from your documents</p>
+      </div>
+    }
 
-  <mat-card-content>
-    <div class="messages" #scrollContainer>
-      @for (msg of messages(); track msg.id) {
-        <div class="message" [class.me]="msg.author === 'me'" [class.bot]="msg.author === 'bot'">
-          <div class="bubble">
-            <div class="text">{{ msg.text }}</div>
-            <div class="time">{{ msg.timestamp | date:'shortTime' }}</div>
-          </div>
+    @for (msg of messages(); track msg.id) {
+      <div class="message" [class.me]="msg.author === 'me'" [class.bot]="msg.author === 'bot'">
+        <div class="bubble" [class.failed]="msg.failed">
+          @if (msg.step && !msg.text) {
+            <div class="step">{{ msg.step }}…</div>
+          }
+
+          <div class="text">{{ msg.text }}@if (msg.streaming) {<span class="caret"></span>}</div>
+
+          @if (msg.sources?.length) {
+            <div class="sources">
+              @for (source of msg.sources; track source.uploadId + ':' + source.chunkIndex) {
+                <span class="source" [matTooltip]="'score ' + (source.score | number:'1.2-2')">
+                  {{ uploadName(source.uploadId) }} #{{ source.chunkIndex }}
+                </span>
+              }
+            </div>
+          }
+
+          <div class="time">{{ msg.timestamp | date:'shortTime' }}</div>
         </div>
-      }
-    </div>
+      </div>
+    }
+  </div>
 
-    <form class="composer" (ngSubmit)="send()">
-      <mat-form-field appearance="outline" class="composer-field">
-        <mat-label>Type a message</mat-label>
-        <input matInput [(ngModel)]="draft" name="draft" autocomplete="off" />
-      </mat-form-field>
-      <button mat-fab color="primary" type="submit" [disabled]="!draft.trim()">
-        <mat-icon>send</mat-icon>
-      </button>
-    </form>
-  </mat-card-content>
-</mat-card>
+  <form class="composer" (ngSubmit)="send()">
+    <!-- One bordered shell: the question on top, and every control that shapes
+         that question (model, documents, send) docked directly beneath it. -->
+    <div class="composer-shell">
+      <textarea
+        class="composer-input"
+        cdkTextareaAutosize
+        cdkAutosizeMinRows="1"
+        cdkAutosizeMaxRows="6"
+        placeholder="Ask a question"
+        [(ngModel)]="draft"
+        name="draft"
+        autocomplete="off"
+        [disabled]="generating()"
+        (keydown.enter)="onEnter($event)"
+      ></textarea>
+
+      <div class="composer-tools">
+        <button
+          type="button"
+          class="tool-chip"
+          mat-button
+          [matMenuTriggerFor]="modelMenu"
+          matTooltip="Choose a model"
+        >
+          <mat-icon>auto_awesome</mat-icon>
+          <span>{{ modelLabel() }}</span>
+        </button>
+
+        <mat-menu #modelMenu="matMenu">
+          @for (option of modelOptions; track option.value) {
+            <button
+              type="button"
+              mat-menu-item
+              [disabled]="option.disabled"
+              (click)="model.set(option.value)"
+            >
+              <mat-icon>{{ model() === option.value ? 'check' : '' }}</mat-icon>
+              <span>{{ option.label }}</span>
+              @if (option.hint) {
+                <span class="menu-hint">{{ option.hint }}</span>
+              }
+            </button>
+          }
+        </mat-menu>
+
+        <button
+          type="button"
+          class="tool-chip"
+          mat-button
+          [matMenuTriggerFor]="docMenu"
+          matTooltip="Choose which documents to search"
+        >
+          <mat-icon>description</mat-icon>
+          <span>{{ connectorLabel() }}</span>
+        </button>
+
+        <mat-menu #docMenu="matMenu" class="doc-menu">
+          @for (upload of readyUploads(); track upload.id) {
+            <!-- stopPropagation keeps the menu open, so several documents can be
+                 ticked in one pass instead of reopening it for each. -->
+            <button
+              type="button"
+              mat-menu-item
+              (click)="toggleConnector(upload.id); $event.stopPropagation()"
+            >
+              <mat-icon>{{
+                isConnectorSelected(upload.id) ? 'check_box' : 'check_box_outline_blank'
+              }}</mat-icon>
+              <span>{{ upload.filename }}</span>
+            </button>
+          } @empty {
+            <button type="button" mat-menu-item disabled>
+              <mat-icon>info</mat-icon>
+              <span>No processed documents yet</span>
+            </button>
+          }
+        </mat-menu>
+
+        <span class="tools-spacer"></span>
+
+        <button
+          class="send-button"
+          mat-fab
+          color="primary"
+          type="submit"
+          aria-label="Send"
+          [disabled]="!draft.trim() || !canSend()"
+          [matTooltip]="connectors().length === 0 ? 'Select at least one document' : ''"
+        >
+          <mat-icon>send</mat-icon>
+        </button>
+      </div>
+    </div>
+  </form>
+</section>

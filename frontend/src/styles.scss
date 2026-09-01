@@ -37,3 +37,19 @@ body {
   height: 100%;
 }
 /* You can add global styles to this file, and also import other style files */
+
+// The documents menu renders in an overlay, outside the query-process
+// component, so its panel styles cannot live in that component's stylesheet.
+.doc-menu.mat-mdc-menu-panel {
+  // Without a cap the panel grows to the full viewport once a handful of files
+  // are uploaded; this keeps it a menu and lets the list scroll.
+  max-height: 320px;
+  min-width: 260px;
+
+  .mat-mdc-menu-item span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

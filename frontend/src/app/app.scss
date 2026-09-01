@@ -10,12 +10,33 @@
 .sidenav-header {
   display: flex;
   align-items: center;
-  gap: 12px;
+}
 
-  .sidenav-title {
-    font-size: 18px;
-    font-weight: 500;
+// Square-edged nav rows with a left accent bar, instead of the pill-shaped
+// default the M3 nav list ships with.
+mat-nav-list {
+  padding-top: 8px;
+
+  a[mat-list-item] {
+    --mat-list-active-indicator-shape: 0;
+    border-radius: 0;
   }
+}
+
+.active-link {
+  background: var(--mat-sys-secondary-container);
+  color: var(--mat-sys-on-secondary-container);
+  font-weight: 500;
+  // An inset shadow rather than a border: a left border would sit on top of
+  // the item's own background and disappear into it.
+  box-shadow: inset 3px 0 0 var(--mat-sys-primary);
+}
+
+// The content column is a flex parent so a routed page can claim the full
+// remaining height (the chat needs it to pin its composer to the bottom).
+mat-sidenav-content {
+  display: flex;
+  flex-direction: column;
 }
 
 .app-toolbar {
@@ -24,15 +45,15 @@
   z-index: 2;
   display: flex;
   gap: 12px;
+  flex: none;
 }
 
 .app-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   padding: 16px;
-  min-height: calc(100vh - 64px);
   background: var(--mat-sys-surface);
-}
-
-.active-link {
-  background: var(--mat-sys-secondary-container);
-  color: var(--mat-sys-on-secondary-container);
 }
