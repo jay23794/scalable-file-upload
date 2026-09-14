@@ -1,11 +1,11 @@
-import { Schema, model, HydratedDocument } from 'mongoose';
+import { Schema, model } from 'mongoose';
 import { FinishReason, QueryModel, QueryRecord, QueryStatus, SourceRef } from './types';
 
 const QUERY_STATUSES: QueryStatus[] = ['generating', 'complete', 'failed'];
 const QUERY_MODELS: QueryModel[] = ['gemini', 'gpt-4o', 'claude'];
 const FINISH_REASONS: FinishReason[] = ['stop', 'length', 'cancelled'];
 
-interface QueryDoc extends Omit<QueryRecord, 'id'> {
+export interface QueryDoc extends Omit<QueryRecord, 'id'> {
   _id: string;
 }
 
@@ -26,8 +26,6 @@ const QuerySchema = new Schema<QueryDoc>(
     connectors: { type: [String], required: true },
     topK: { type: Number, required: true },
     status: { type: String, enum: QUERY_STATUSES, required: true, index: true },
-    createdAt: { type: Date, required: true },
-    updatedAt: { type: Date, required: true },
     // Written only by the QueueEvents 'completed' handler (Path A).
     text: { type: String, required: false },
     // `default: undefined` suppresses Mongoose's automatic [] for array paths.
@@ -39,7 +37,11 @@ const QuerySchema = new Schema<QueryDoc>(
     // Written only by the QueueEvents 'failed' handler.
     failedReason: { type: String, required: false },
   },
-  { _id: false, versionKey: false },
+  // `timestamps: true` owns createdAt/updatedAt — set together on insert and
+  // bumped on every findByIdAndUpdate. Any future write that must NOT look
+  // like fresh activity (the sweeper touching a row) needs `timestamps: false`,
+  // or it will keep resetting itself out of the stage-1 scan below.
+  { _id: false, versionKey: false, timestamps: true },
 );
 
 // Backs the generation sweeper's stage-1 scan when it lands.
@@ -47,7 +49,9 @@ QuerySchema.index({ status: 1, updatedAt: 1 });
 
 export const QueryModelDoc = model<QueryDoc>('Query', QuerySchema);
 
-export const toRecord = (doc: HydratedDocument<QueryDoc>): QueryRecord => ({
+// Accepts both a hydrated document (from create) and a lean POJO (from the
+// read paths) — HydratedDocument<QueryDoc> is structurally a QueryDoc.
+export const toRecord = (doc: QueryDoc): QueryRecord => ({
   id: doc._id,
   query: doc.query,
   model: doc.model,

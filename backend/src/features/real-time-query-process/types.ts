@@ -38,6 +38,10 @@ export interface QueryRecord {
   failedReason?: string;
 }
 
+// What a caller supplies to create a row. createdAt/updatedAt are omitted
+// because the schema's `timestamps: true` stamps them on write.
+export type NewQueryRecord = Omit<QueryRecord, 'createdAt' | 'updatedAt'>;
+
 // Statuses the sweeper would treat as candidates. Only one today, but kept in
 // the same shape as IN_FLIGHT_STATUSES in file-upload-ocr/types.ts.
 export const IN_FLIGHT_QUERY_STATUSES: QueryStatus[] = ['generating'];

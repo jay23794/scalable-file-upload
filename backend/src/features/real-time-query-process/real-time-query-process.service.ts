@@ -17,7 +17,6 @@ export class RealTimeQueryProcessService {
   ) {}
 
   async submitQuery(input: CreateQueryInput): Promise<SubmitQueryResult> {
-    const now = new Date();
     const queryId = randomUUID();
     // Resolve the default here, not in the worker, so the row records the topK
     // that was actually used. Otherwise changing QUERY_TOPK_DEFAULT silently
@@ -34,8 +33,6 @@ export class RealTimeQueryProcessService {
       connectors: input.connectors,
       topK,
       status: 'generating',
-      createdAt: now,
-      updatedAt: now,
     });
 
     try {
