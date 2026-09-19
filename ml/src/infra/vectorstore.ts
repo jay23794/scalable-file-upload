@@ -65,18 +65,56 @@ function getClient(): SupabaseClient {
   return clientInstance;
 }
 
+// A transport failure at boot is usually transient — the container's network,
+// DNS, or a VPN is not up yet, or a paused project is still waking. Retrying
+// costs a few seconds and turns a crashed start into a slow one. Schema errors
+// are not retried: a missing table will still be missing in four seconds.
+async function selectProbe(): Promise<{ message: string; code?: string } | null> {
+  const client = getClient();
+  const { error } = await client.from(env.supabase.table).select('pk').limit(1);
+  return error ? { message: error.message, code: error.code } : null;
+}
+
+function isSchemaError(e: { message: string; code?: string }): boolean {
+  return e.code === 'PGRST205' || /schema cache/i.test(e.message);
+}
+
+const INIT_RETRY_DELAYS_MS = [500, 1500, 4000];
+
 export const vectorStore: VectorStore = {
   name: 'supabase',
 
   async init(): Promise<void> {
-    const client = getClient();
-    const { error } = await client.from(env.supabase.table).select('pk').limit(1);
-    if (error) {
+    let error = await selectProbe();
+    if (!error) return;
+
+    for (const delay of INIT_RETRY_DELAYS_MS) {
+      if (isSchemaError(error)) break;
+      console.warn(
+        `[ml] supabase unreachable (${error.message}); retrying in ${delay}ms`
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      error = await selectProbe();
+      if (!error) return;
+    }
+
+    // Distinguish the two failures that used to share one message. PostgREST
+    // answering with PGRST205 means it reached the database and the table is
+    // genuinely absent. A transport failure — 'TypeError: fetch failed' — means
+    // no response at all, so nothing is known about the schema and telling the
+    // operator to run the init SQL sends them down the wrong path.
+    if (isSchemaError(error)) {
       throw new Error(
-        `supabase table '${env.supabase.table}' not reachable: ${error.message}. ` +
+        `supabase table '${env.supabase.table}' does not exist: ${error.message}. ` +
           `Run ml/sql/supabase_init.sql in the Supabase SQL editor first.`
       );
     }
+
+    throw new Error(
+      `cannot reach supabase at ${env.supabase.url}: ${error.message}. ` +
+        `This is a connectivity problem, not a schema one — check network/DNS, ` +
+        `that SUPABASE_URL is correct, and that the project is not paused.`
+    );
   },
 
   async upsert(rows: ChunkRow[]): Promise<void> {
