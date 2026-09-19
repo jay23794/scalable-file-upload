@@ -1,8 +1,19 @@
 import { Router } from 'express';
-import { create, getById, list } from './real-time-query-process.controller';
+import {
+  create,
+  getById,
+  getConversationById,
+  list,
+  listConversations,
+  startConversation,
+} from './real-time-query-process.controller';
 import { stream } from './real-time-query-process.stream';
 
 const router = Router();
+
+router.post('/conversations', startConversation);
+router.get('/conversations', listConversations);
+router.get('/conversations/:id', getConversationById);
 
 router.post('/queries', create);
 router.get('/queries', list);

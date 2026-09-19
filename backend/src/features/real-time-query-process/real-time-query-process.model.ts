@@ -21,6 +21,7 @@ const SourceRefSchema = new Schema<SourceRef>(
 const QuerySchema = new Schema<QueryDoc>(
   {
     _id: { type: String, required: true },
+    conversationId: { type: String, required: true },
     query: { type: String, required: true },
     model: { type: String, enum: QUERY_MODELS, required: true },
     connectors: { type: [String], required: true },
@@ -46,6 +47,8 @@ const QuerySchema = new Schema<QueryDoc>(
 
 // Backs the generation sweeper's stage-1 scan when it lands.
 QuerySchema.index({ status: 1, updatedAt: 1 });
+// Backs the conversation fetch — every turn in one conversation, oldest first.
+QuerySchema.index({ conversationId: 1, createdAt: 1 });
 
 export const QueryModelDoc = model<QueryDoc>('Query', QuerySchema);
 
@@ -53,6 +56,7 @@ export const QueryModelDoc = model<QueryDoc>('Query', QuerySchema);
 // read paths) — HydratedDocument<QueryDoc> is structurally a QueryDoc.
 export const toRecord = (doc: QueryDoc): QueryRecord => ({
   id: doc._id,
+  conversationId: doc.conversationId,
   query: doc.query,
   model: doc.model,
   connectors: doc.connectors,

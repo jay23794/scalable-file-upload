@@ -1,3 +1,4 @@
+import { ConversationRepository } from '../features/real-time-query-process/conversation.repository';
 import { FileUploadOcrRepository } from '../features/file-upload-ocr/file-upload-ocr.repository';
 import { FileUploadOcrService } from '../features/file-upload-ocr/file-upload-ocr.service';
 import { InternalService } from '../features/internal/internal.service';
@@ -10,6 +11,7 @@ import { generateQueue } from './generateQueue';
 
 const _fileUploadOcrRepository = new FileUploadOcrRepository();
 const _realTimeQueryProcessRepository = new RealTimeQueryProcessRepository();
+const _conversationRepository = new ConversationRepository();
 const _storage = new SupabaseStorageService();
 
 export const fileUploadOcrService = new FileUploadOcrService(
@@ -21,6 +23,7 @@ export const fileUploadOcrService = new FileUploadOcrService(
 
 export const realTimeQueryProcessService = new RealTimeQueryProcessService(
   _realTimeQueryProcessRepository,
+  _conversationRepository,
   generateQueue,
 );
 

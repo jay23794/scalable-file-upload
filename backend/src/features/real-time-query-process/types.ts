@@ -20,8 +20,11 @@ export interface GenerationResult {
   finishReason: FinishReason;
 }
 
+// One row = one turn: the user's question and the assistant's answer together.
+// `id` doubles as the message id — there is no separate messageId.
 export interface QueryRecord {
   id: string;
+  conversationId: string;
   query: string;
   model: QueryModel;
   connectors: string[];
@@ -41,6 +44,28 @@ export interface QueryRecord {
 // What a caller supplies to create a row. createdAt/updatedAt are omitted
 // because the schema's `timestamps: true` stamps them on write.
 export type NewQueryRecord = Omit<QueryRecord, 'createdAt' | 'updatedAt'>;
+
+export interface ConversationRecord {
+  id: string;
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type NewConversationRecord = Omit<ConversationRecord, 'createdAt' | 'updatedAt'>;
+
+// Used when the client starts a conversation without naming it. A domain fact,
+// not a validation detail — the row always has a title.
+export const DEFAULT_CONVERSATION_TITLE = 'New conversation';
+
+// Thrown by submitQuery when the target conversation does not exist, so the
+// controller can answer 404 instead of writing a message that belongs nowhere.
+export class ConversationNotFoundError extends Error {
+  constructor(public conversationId: string) {
+    super(`Conversation ${conversationId} not found`);
+    this.name = 'ConversationNotFoundError';
+  }
+}
 
 // Statuses the sweeper would treat as candidates. Only one today, but kept in
 // the same shape as IN_FLIGHT_STATUSES in file-upload-ocr/types.ts.

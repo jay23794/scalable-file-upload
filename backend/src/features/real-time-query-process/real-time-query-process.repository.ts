@@ -13,6 +13,12 @@ export class RealTimeQueryProcessRepository {
     return doc ? toRecord(doc) : undefined;
   }
 
+  // Every turn in one conversation, oldest first — the chat transcript.
+  async listByConversation(conversationId: string): Promise<QueryRecord[]> {
+    const docs = await QueryModelDoc.find({ conversationId }).sort({ createdAt: 1 }).lean();
+    return docs.map(toRecord);
+  }
+
   async list(): Promise<QueryRecord[]> {
     const docs = await QueryModelDoc.find().sort({ createdAt: -1 }).lean();
     return docs.map(toRecord);
