@@ -60,12 +60,27 @@
       <mat-divider></mat-divider>
     }
 
-    <mat-list>
-      <div mat-subheader>
-        Uploaded Files
+    <div class="uploads">
+      <div class="uploads-header">
+        <span class="uploads-title">Uploaded Files</span>
+
+        @if (uploaded.length > 0) {
+          <span class="uploads-count">
+            {{ visibleUploads.length }} of {{ uploaded.length }}
+          </span>
+        }
+
+        <span class="uploads-spacer"></span>
+
+        <!-- Only offered when it would actually reveal something. -->
+        @if (uploaded.length > recentLimit) {
+          <button mat-button class="show-all" (click)="showAll = !showAll">
+            {{ showAll ? 'Show recent' : 'Show all' }}
+          </button>
+        }
+
         <button
           mat-icon-button
-          class="refresh-btn"
           (click)="refreshList()"
           [disabled]="listLoading"
           aria-label="Refresh"
@@ -75,28 +90,34 @@
       </div>
 
       @if (uploaded.length === 0 && !listLoading) {
-        <mat-list-item>
-          <div matListItemTitle class="muted">No files uploaded yet.</div>
-        </mat-list-item>
+        <p class="uploads-empty">No files uploaded yet.</p>
       }
 
-      @for (record of uploaded; track record.id) {
-        <mat-list-item>
-          <mat-icon matListItemIcon>description</mat-icon>
-          <div matListItemTitle>{{ record.filename }}</div>
-          <div matListItemLine>
-            {{ formatSize(record.size) }} — {{ record.mimeType }}
+      @for (record of visibleUploads; track record.id) {
+        <div class="upload-tile">
+          <mat-icon class="tile-icon">description</mat-icon>
+
+          <div class="tile-main">
+            <div class="tile-name" [title]="record.filename">{{ record.filename }}</div>
+            <div class="tile-meta">
+              {{ formatSize(record.size) }} · {{ uploadedAgo(record.createdAt) }}
+            </div>
           </div>
+
+          <span class="tile-status" [class]="'is-' + record.status">
+            {{ statusLabel(record.status) }}
+          </span>
+
           <button
             mat-icon-button
-            matListItemMeta
             (click)="openDownload(record)"
-            aria-label="Open download"
+            [attr.aria-label]="'Download ' + record.filename"
           >
             <mat-icon>download</mat-icon>
           </button>
-        </mat-list-item>
+        </div>
       }
-    </mat-list>
+    </div>
+
   </mat-card-content>
 </mat-card>

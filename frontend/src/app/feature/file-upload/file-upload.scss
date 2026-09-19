@@ -36,6 +36,103 @@
   color: var(--mat-sys-outline);
 }
 
-.refresh-btn {
-  float: right;
+.uploads {
+  margin-top: 8px;
+}
+
+.uploads-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 8px;
+
+  .uploads-title {
+    font: var(--mat-sys-title-small);
+    color: var(--mat-sys-on-surface);
+  }
+
+  // Reads as "5 of 12" beside the heading, so the cut-off is stated rather than
+  // silently hiding rows.
+  .uploads-count {
+    font-size: 12px;
+    color: var(--mat-sys-on-surface-variant);
+    opacity: 0.8;
+  }
+
+  .uploads-spacer {
+    flex: 1;
+  }
+
+  .show-all {
+    font-size: 12px;
+  }
+}
+
+.uploads-empty {
+  margin: 8px 4px;
+  font-size: 13px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+// A bordered row rather than a mat-list-item: the status chip and the download
+// action both need a fixed column, which the list's title/line slots do not give.
+.upload-tile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 10px;
+  background: var(--mat-sys-surface-container-low);
+
+  & + .upload-tile {
+    margin-top: 6px;
+  }
+
+  .tile-icon {
+    color: var(--mat-sys-on-surface-variant);
+    opacity: 0.7;
+  }
+
+  .tile-main {
+    min-width: 0;
+  }
+
+  // A long filename truncates instead of wrapping the row to two lines.
+  .tile-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    color: var(--mat-sys-on-surface);
+  }
+
+  .tile-meta {
+    font-size: 12px;
+    color: var(--mat-sys-on-surface-variant);
+    opacity: 0.8;
+  }
+}
+
+// Only 'ready' files are searchable from the chat, so that state gets the
+// filled treatment and everything else stays quiet.
+.tile-status {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--mat-sys-surface-container-highest);
+  color: var(--mat-sys-on-surface-variant);
+
+  &.is-ready {
+    background: var(--mat-sys-secondary-container);
+    color: var(--mat-sys-on-secondary-container);
+  }
+
+  &.is-failed {
+    background: var(--mat-sys-error-container);
+    color: var(--mat-sys-on-error-container);
+  }
 }

@@ -45,12 +45,25 @@ export interface CompleteRequest {
   mimeType: string;
 }
 
+/**
+ * Server-side lifecycle of a stored file. Only 'ready' files have embeddings,
+ * so only they can be searched from the chat — which is why the list surfaces
+ * this rather than leaving every row looking equally usable.
+ */
+export type UploadRecordStatus =
+  | 'pending'
+  | 'ocr_processing'
+  | 'ml_processing'
+  | 'ready'
+  | 'failed';
+
 export interface UploadRecord {
   id: string;
   path: string;
   filename: string;
   size: number;
   mimeType: string;
+  status: UploadRecordStatus;
   createdAt: string;
   downloadUrl?: string;
 }

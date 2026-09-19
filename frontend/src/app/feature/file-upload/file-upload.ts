@@ -15,11 +15,27 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatDividerModule } from '@angular/material/divider';
 import { Subscription } from 'rxjs';
 import { FileUploadService } from './file-upload.service';
-import { PipelineStep, UploadItem, UploadRecord } from './file-upload.types';
+import {
+  PipelineStep,
+  UploadItem,
+  UploadRecord,
+  UploadRecordStatus,
+} from './file-upload.types';
 import { SocketService } from '../../core/socket.service';
 
 let nextClientId = 0;
 const makeClientId = () => `u_${Date.now()}_${++nextClientId}`;
+
+/** How many of the newest files the list shows before "Show all". */
+const RECENT_LIMIT = 5;
+
+const STATUS_LABELS: Record<UploadRecordStatus, string> = {
+  pending: 'Pending',
+  ocr_processing: 'Reading',
+  ml_processing: 'Indexing',
+  ready: 'Ready',
+  failed: 'Failed',
+};
 
 @Component({
   selector: 'app-file-upload',
@@ -44,6 +60,18 @@ export class FileUpload implements OnInit, OnDestroy {
   items: UploadItem[] = [];
   uploaded: UploadRecord[] = [];
   listLoading = false;
+
+  readonly recentLimit = RECENT_LIMIT;
+  showAll = false;
+
+  /**
+   * The rows actually rendered. `uploaded` is already sorted newest-first by
+   * refreshList, so this only ever slices — no per-cycle sorting from a getter
+   * the template calls on every change detection pass.
+   */
+  get visibleUploads(): UploadRecord[] {
+    return this.showAll ? this.uploaded : this.uploaded.slice(0, RECENT_LIMIT);
+  }
 
   private socketSubs = new Map<string, Subscription>();
 
@@ -103,7 +131,11 @@ export class FileUpload implements OnInit, OnDestroy {
     this.listLoading = true;
     this.api.list().subscribe({
       next: (res) => {
-        this.uploaded = res.data ?? [];
+        // Sort here rather than trusting the endpoint's order: "recent" is the
+        // whole point of the cut-off, so the top 5 has to be the newest 5.
+        this.uploaded = [...(res.data ?? [])].sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        );
         this.listLoading = false;
         this.cdr.detectChanges();
       },
@@ -121,6 +153,27 @@ export class FileUpload implements OnInit, OnDestroy {
         if (url) window.open(url, '_blank');
       },
     });
+  }
+
+  statusLabel(status: UploadRecordStatus): string {
+    return STATUS_LABELS[status] ?? status;
+  }
+
+  /** Short age for an uploaded file — absolute date once it stops being useful. */
+  uploadedAgo(iso: string): string {
+    const elapsed = Date.now() - new Date(iso).getTime();
+    const minutes = Math.floor(elapsed / 60_000);
+
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   formatSize(bytes: number): string {
