@@ -19,11 +19,6 @@ export class RealTimeQueryProcessRepository {
     return docs.map(toRecord);
   }
 
-  async list(): Promise<QueryRecord[]> {
-    const docs = await QueryModelDoc.find().sort({ createdAt: -1 }).lean();
-    return docs.map(toRecord);
-  }
-
   async markComplete(id: string, result: GenerationResult): Promise<QueryRecord | undefined> {
     const doc = await QueryModelDoc.findByIdAndUpdate(
       id,

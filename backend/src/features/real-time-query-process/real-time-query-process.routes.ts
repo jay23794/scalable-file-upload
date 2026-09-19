@@ -3,7 +3,6 @@ import {
   create,
   getById,
   getConversationById,
-  list,
   listConversations,
   startConversation,
 } from './real-time-query-process.controller';
@@ -16,7 +15,6 @@ router.get('/conversations', listConversations);
 router.get('/conversations/:id', getConversationById);
 
 router.post('/queries', create);
-router.get('/queries', list);
 router.get('/queries/:id', getById);
 // Read-only SSE view onto an in-flight generation. Path A is what persists the
 // answer; this endpoint never writes.

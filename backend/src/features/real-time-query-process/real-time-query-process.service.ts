@@ -97,10 +97,6 @@ export class RealTimeQueryProcessService {
     return this._repo.findById(id);
   }
 
-  async listQueries(): Promise<QueryRecord[]> {
-    return this._repo.list();
-  }
-
   // Called only by the QueueEvents handlers (Path A) — the sole Mongo writer
   // for generation results. The SSE handler must never call these.
   async markComplete(id: string, result: GenerationResult): Promise<QueryRecord | undefined> {
