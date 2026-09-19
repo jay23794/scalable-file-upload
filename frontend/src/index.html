@@ -13,6 +13,25 @@
       rel="stylesheet"
     />
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
+
+    <!--
+      Applies the saved theme before first paint. ThemeService sets the same
+      attribute, but only once Angular has bootstrapped — by then a dark-mode
+      user has already been shown a white screen. This has to stay inline and
+      synchronous in <head>; an external or deferred script is too late.
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('ocean-theme-preference');
+          if (saved === 'light' || saved === 'dark') {
+            document.documentElement.setAttribute('data-theme', saved);
+          }
+        } catch (e) {
+          /* Blocked storage — fall through to following the OS. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <app-root></app-root>

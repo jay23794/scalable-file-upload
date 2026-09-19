@@ -4,9 +4,135 @@
   min-height: 0;
 }
 
+// Sidebar beside transcript. min-height:0 on both so the two scrollers size to
+// the viewport instead of growing the page.
+.layout {
+  display: flex;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.sidebar {
+  flex: none;
+  width: 264px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-right: 16px;
+  border-right: 1px solid var(--mat-sys-outline-variant);
+}
+
+.conversation-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  // Room for the footer button's border without the last row touching it.
+  padding-bottom: 8px;
+}
+
+.conversation-group + .conversation-group {
+  margin-top: 14px;
+}
+
+// Age headings give the list a scannable spine once it is more than a screen
+// long; without them every row looks equally recent.
+.group-label {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mat-sys-on-surface-variant);
+  opacity: 0.7;
+}
+
+// A plain button rather than mat-list-item: the row is one flat click target
+// and the active state is a background swap, which needs no list machinery.
+.conversation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--mat-sys-on-surface-variant);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--mat-sys-surface-container-high);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--mat-sys-primary);
+    outline-offset: -2px;
+  }
+
+  &.active {
+    background: var(--mat-sys-secondary-container);
+    color: var(--mat-sys-on-secondary-container);
+
+    .title {
+      font-weight: 600;
+    }
+
+    mat-icon,
+    .when {
+      opacity: 1;
+    }
+  }
+
+  mat-icon {
+    grid-row: 1 / span 2;
+    width: 18px;
+    height: 18px;
+    font-size: 18px;
+    opacity: 0.6;
+  }
+
+  // Titles are whole questions, so one line with an ellipsis rather than wrap.
+  .title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .when {
+    font-size: 11px;
+    line-height: 14px;
+    opacity: 0.65;
+  }
+}
+
+.sidebar-empty {
+  margin: 8px 12px;
+  font-size: 13px;
+  opacity: 0.6;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+// Docked to the bottom of the sidebar, divided from the list it follows.
+.new-chat {
+  flex: none;
+  justify-content: flex-start;
+  height: 40px;
+  margin-top: 8px;
+  border-radius: 20px;
+}
+
+
 // Full-bleed page: no card, the transcript owns all the height it can get and
 // the composer stays pinned to the bottom edge.
 .chat {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -25,9 +151,17 @@
 
 .message {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
 
   &.me {
-    justify-content: flex-end;
+    align-items: flex-end;
+
+    // Sits over the bubble's edge on each side, so the name lines up with the
+    // side of the transcript its messages are on.
+    .author {
+      padding-right: 4px;
+    }
 
     .bubble {
       background: var(--mat-sys-primary-container);
@@ -37,10 +171,16 @@
   }
 
   &.bot {
-    justify-content: flex-start;
+    align-items: flex-start;
+
+    .author {
+      padding-left: 4px;
+    }
 
     .bubble {
-      background: var(--mat-sys-surface-container-high);
+      // -highest rather than -high: in dark mode -high lands 1.28:1 against the
+      // page, so the answer stopped reading as its own object.
+      background: var(--mat-sys-surface-container-highest);
       color: var(--mat-sys-on-surface);
       border-bottom-left-radius: 4px;
     }
@@ -55,6 +195,13 @@
   .text {
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  // pre-wrap above is for the user's side, where newlines are content. Parsed
+  // markdown is real block markup, and keeping it would render the newlines
+  // marked emits between tags as visible blank lines inside lists.
+  .markdown {
+    white-space: normal;
   }
 
   .time {
@@ -197,32 +344,88 @@
     text-transform: capitalize;
   }
 
-  // A blinking block that sits inline with the last token, so the answer reads
-  // as still being written rather than finished-but-short.
-  .caret {
-    display: inline-block;
-    width: 7px;
-    height: 1em;
-    margin-left: 2px;
-    vertical-align: text-bottom;
-    background: currentColor;
-    opacity: 0.75;
-    animation: caret-blink 1s steps(2, start) infinite;
+
+}
+
+// Normal case, unlike the uppercase SOURCES caption below the bubble: this is
+// a name, and shouting it every turn would compete with the message itself.
+.author {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+  color: var(--mat-sys-on-surface-variant);
+  opacity: 0.75;
+}
+
+// Citations for one answer, aligned under its bubble and capped to the same
+// column so a long filename cannot widen the transcript.
+.sources {
+  max-width: min(70%, 720px);
+}
+
+.sources-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mat-sys-on-surface-variant);
+  opacity: 0.8;
+
+  mat-icon {
+    width: 14px;
+    height: 14px;
+    font-size: 14px;
+  }
+}
+
+.source-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+// A tile rather than a chip: the filename needs its own line to stay readable,
+// and the chunk/score belong under it as a caption rather than in a tooltip.
+.source-tile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 8px;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 10px;
+  background: var(--mat-sys-surface-container-low);
+
+  mat-icon {
+    grid-row: 1 / span 2;
+    width: 18px;
+    height: 18px;
+    font-size: 18px;
+    color: var(--mat-sys-on-surface-variant);
+    opacity: 0.7;
   }
 
-  .sources {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 8px;
+  .source-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--mat-sys-on-surface);
+  }
 
-    .source {
-      font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 10px;
-      background: var(--mat-sys-surface-container-highest);
-      opacity: 0.85;
-    }
+  .source-meta {
+    font-size: 11px;
+    color: var(--mat-sys-on-surface-variant);
+    opacity: 0.8;
   }
 }
 
@@ -230,12 +433,31 @@
   .composer-tools .tool-chip span {
     max-width: 100px;
   }
-}
 
-@keyframes caret-blink {
-  to { visibility: hidden; }
-}
+  // The sidebar would eat the transcript at this width, so it collapses to a
+  // strip of icons — still switchable, via the tooltip for the title.
+  .sidebar {
+    width: 56px;
+    padding-right: 8px;
+  }
 
-@media (prefers-reduced-motion: reduce) {
-  .bubble .caret { animation: none; }
+  .new-chat span,
+  .conversation .title,
+  .conversation .when,
+  .group-label,
+  .sidebar-empty {
+    display: none;
+  }
+
+  .new-chat {
+    min-width: 0;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .conversation {
+    grid-template-columns: auto;
+    justify-items: center;
+    padding: 8px;
+  }
 }

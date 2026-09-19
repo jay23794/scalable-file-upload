@@ -16,9 +16,11 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { TextFieldModule } from '@angular/cdk/text-field';
-import { Subscription } from 'rxjs';
+import { Observable, Subscription, map, of, switchMap, tap } from 'rxjs';
+import { MarkdownPipe } from './markdown.pipe';
 import { QueryProcessService } from './query-process.service';
 import {
+  ConversationRecord,
   QueryModel,
   QueryRecord,
   SourceRef,
@@ -53,6 +55,21 @@ const MODEL_OPTIONS: ModelOption[] = [
   { value: 'claude', label: 'Claude', disabled: true, hint: 'Not wired in the ML worker yet' },
 ];
 
+/** The first question becomes the conversation title; the schema caps it at 200. */
+const TITLE_MAX = 80;
+
+/** What the assistant is called in the transcript. */
+const ASSISTANT_NAME = 'Nova';
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+interface ConversationGroup {
+  label: string;
+  items: ConversationRecord[];
+}
+
 @Component({
   selector: 'app-query-process',
   standalone: true,
@@ -64,6 +81,7 @@ const MODEL_OPTIONS: ModelOption[] = [
     MatMenuModule,
     MatTooltipModule,
     TextFieldModule,
+    MarkdownPipe,
   ],
   templateUrl: './query-process.html',
   styleUrl: './query-process.scss',
@@ -76,11 +94,16 @@ export class QueryProcess implements OnInit, OnDestroy, AfterViewChecked {
   // EventSource keeps a server-side blocking Redis reader alive.
   private readonly streams = new Set<Subscription>();
 
+  protected readonly conversations = signal<ConversationRecord[]>([]);
+  // null means "a new chat that has not been sent yet" — no row exists for it
+  // server-side, and send() is what mints one.
+  protected readonly activeId = signal<string | null>(null);
   protected readonly messages = signal<ChatMessage[]>([]);
   protected readonly uploads = signal<UploadSummary[]>([]);
   protected readonly loading = signal(true);
   protected readonly loadError = signal<string | null>(null);
 
+  protected readonly assistantName = ASSISTANT_NAME;
   protected readonly modelOptions = MODEL_OPTIONS;
   // Signals, not plain fields: canSend/modelLabel are computed from these, and a
   // computed over a plain field would cache its first value and never update.
@@ -104,14 +127,51 @@ export class QueryProcess implements OnInit, OnDestroy, AfterViewChecked {
     () => !this.generating() && this.connectors().length > 0,
   );
 
+  /**
+   * Buckets the sidebar by age. The list arrives sorted by updatedAt desc, so
+   * each bucket keeps that order and the headings come out in sequence — no
+   * re-sorting needed, only partitioning.
+   */
+  protected readonly conversationGroups = computed<ConversationGroup[]>(() => {
+    const now = new Date();
+    // Midnight, not now-minus-24h: "Yesterday" has to mean the calendar day,
+    // otherwise a conversation from this morning drifts into it after lunch.
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+    const groups: ConversationGroup[] = [
+      { label: 'Today', items: [] },
+      { label: 'Yesterday', items: [] },
+      { label: 'Previous 7 days', items: [] },
+      { label: 'Older', items: [] },
+    ];
+
+    for (const conversation of this.conversations()) {
+      const at = new Date(conversation.updatedAt).getTime();
+      if (at >= today) groups[0].items.push(conversation);
+      else if (at >= today - DAY) groups[1].items.push(conversation);
+      else if (at >= today - 7 * DAY) groups[2].items.push(conversation);
+      else groups[3].items.push(conversation);
+    }
+
+    return groups.filter((group) => group.items.length > 0);
+  });
+
   ngOnInit(): void {
     this.loadUploads();
-    this.loadHistory();
+    this.bootstrap();
   }
 
   ngOnDestroy(): void {
-    // Closing these does NOT cancel generation — the worker runs to completion
-    // and Path A persists the answer. It only stops us watching.
+    this.closeStreams();
+  }
+
+  /**
+   * Closing these does NOT cancel generation — the worker runs to completion
+   * and Path A persists the answer. It only stops us watching, which is also
+   * why switching conversations mid-generation is safe: the answer is still
+   * there on the way back.
+   */
+  private closeStreams(): void {
     for (const sub of this.streams) sub.unsubscribe();
     this.streams.clear();
   }
@@ -135,25 +195,80 @@ export class QueryProcess implements OnInit, OnDestroy, AfterViewChecked {
     });
   }
 
-  private loadHistory(): void {
-    this.api.list().subscribe({
+  /** First paint: the sidebar, plus whichever conversation they were last in. */
+  private bootstrap(): void {
+    this.api.listConversations().subscribe({
       next: (res) => {
-        // The API returns newest-first; a transcript reads oldest-first.
-        const records = [...(res.data ?? [])].reverse();
-        this.messages.set(records.flatMap((r) => this.toMessages(r)));
+        const list = res.data ?? [];
+        this.conversations.set(list);
+
+        // Sorted by updatedAt desc server-side, so [0] is the most recent one.
+        // An empty list is not an error — it is a first visit, and the blank
+        // composer is the right thing to show.
+        if (list.length > 0) this.open(list[0].id);
+        else this.loading.set(false);
+      },
+      error: (err) => {
+        this.loading.set(false);
+        this.loadError.set(err?.message ?? 'Could not load your conversations');
+      },
+    });
+  }
+
+  /** Re-reads the sidebar after a send, which reorders it by updatedAt. */
+  private refreshConversations(): void {
+    this.api.listConversations().subscribe({
+      next: (res) => this.conversations.set(res.data ?? []),
+      // A stale sidebar is not worth an error banner over a live transcript.
+      error: () => {},
+    });
+  }
+
+  protected open(id: string): void {
+    if (id === this.activeId()) return;
+
+    this.closeStreams();
+    this.activeId.set(id);
+    this.messages.set([]);
+    this.loadError.set(null);
+    this.loading.set(true);
+
+    this.api.getConversation(id).subscribe({
+      next: (res) => {
+        // A slower earlier request must not overwrite a newer selection.
+        if (this.activeId() !== id) return;
+
+        // Already oldest-first from the backend, which is transcript order.
+        const queries = res.data?.queries ?? [];
+        this.messages.set(queries.flatMap((r) => this.toMessages(r)));
         this.loading.set(false);
 
         // Anything still generating was left mid-flight by an earlier visit —
         // reattach so it finishes rendering live instead of sitting frozen.
-        for (const record of records) {
+        for (const record of queries) {
           if (record.status === 'generating') this.attach(record.id);
         }
       },
       error: (err) => {
+        if (this.activeId() !== id) return;
         this.loading.set(false);
-        this.loadError.set(err?.message ?? 'Could not load your query history');
+        this.loadError.set(err?.message ?? 'Could not load this conversation');
       },
     });
+  }
+
+  /**
+   * Clears to a blank chat without touching the server. The row is minted by
+   * the first send, so repeatedly clicking this cannot litter the sidebar with
+   * empty conversations.
+   */
+  protected newChat(): void {
+    this.closeStreams();
+    this.activeId.set(null);
+    this.messages.set([]);
+    this.loadError.set(null);
+    this.loading.set(false);
+    this.draft = '';
   }
 
   private toMessages(record: QueryRecord): ChatMessage[] {
@@ -216,34 +331,62 @@ export class QueryProcess implements OnInit, OnDestroy, AfterViewChecked {
 
     this.draft = '';
 
-    this.api.submit({ query, model: this.model(), connectors: this.connectors() }).subscribe({
-      next: (res) => {
-        const queryId = res.data.queryId;
-        const now = new Date();
+    const open = this.activeId();
 
-        this.messages.update((list) => [
-          ...list,
-          { id: `${queryId}:q`, author: 'me', text: query, timestamp: now },
-          { id: queryId, author: 'bot', text: '', timestamp: now, streaming: true },
-        ]);
+    // A conversation is minted on the first message rather than when "New chat"
+    // is clicked, so an abandoned blank chat leaves nothing behind. The first
+    // question doubles as the title — the backend would otherwise file it all
+    // under 'New conversation' and the sidebar would be unreadable.
+    const conversationId$: Observable<string> = open
+      ? of(open)
+      : this.api.startConversation({ title: query.slice(0, TITLE_MAX) }).pipe(
+          map((res) => res.data.id),
+          tap((id) => this.activeId.set(id)),
+        );
 
-        this.attach(queryId);
-      },
-      error: (err) => {
-        const now = new Date();
-        this.messages.update((list) => [
-          ...list,
-          { id: `local-${now.getTime()}:q`, author: 'me', text: query, timestamp: now },
-          {
-            id: `local-${now.getTime()}`,
-            author: 'bot',
-            text: err?.error?.error ?? 'Could not submit the query',
-            timestamp: now,
-            failed: true,
-          },
-        ]);
-      },
-    });
+    conversationId$
+      .pipe(
+        switchMap((conversationId) =>
+          this.api.submit({
+            conversationId,
+            query,
+            model: this.model(),
+            connectors: this.connectors(),
+          }),
+        ),
+      )
+      .subscribe({
+        next: (res) => {
+          const queryId = res.data.queryId;
+          const now = new Date();
+
+          this.messages.update((list) => [
+            ...list,
+            { id: `${queryId}:q`, author: 'me', text: query, timestamp: now },
+            { id: queryId, author: 'bot', text: '', timestamp: now, streaming: true },
+          ]);
+
+          this.attach(queryId);
+
+          // Picks up a brand-new conversation, and reorders the sidebar for an
+          // existing one whose updatedAt just moved.
+          this.refreshConversations();
+        },
+        error: (err) => {
+          const now = new Date();
+          this.messages.update((list) => [
+            ...list,
+            { id: `local-${now.getTime()}:q`, author: 'me', text: query, timestamp: now },
+            {
+              id: `local-${now.getTime()}`,
+              author: 'bot',
+              text: err?.error?.error ?? 'Could not submit the query',
+              timestamp: now,
+              failed: true,
+            },
+          ]);
+        },
+      });
   }
 
   /** Opens the SSE view onto one generation and folds its events into the bubble. */
@@ -309,6 +452,19 @@ export class QueryProcess implements OnInit, OnDestroy, AfterViewChecked {
 
   private patch(id: string, change: (m: ChatMessage) => ChatMessage): void {
     this.messages.update((list) => list.map((m) => (m.id === id ? change(m) : m)));
+  }
+
+  /** Short age for a sidebar row — absolute date once it stops being useful. */
+  protected relativeTime(iso: string): string {
+    const at = new Date(iso).getTime();
+    const elapsed = Date.now() - at;
+
+    if (elapsed < MINUTE) return 'just now';
+    if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m ago`;
+    if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h ago`;
+    if (elapsed < 7 * DAY) return `${Math.floor(elapsed / DAY)}d ago`;
+
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   protected uploadName(uploadId: string): string {

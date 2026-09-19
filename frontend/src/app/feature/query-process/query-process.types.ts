@@ -16,6 +16,7 @@ export interface SourceRef {
 
 export interface QueryRecord {
   id: string;
+  conversationId: string;
   query: string;
   model: QueryModel;
   connectors: string[];
@@ -40,7 +41,26 @@ export type StreamEvent =
   | { type: 'cancelled' }
   | { type: 'error'; message: string };
 
+export interface ConversationRecord {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Optional: starting a fresh conversation needs no input at all. */
+export interface StartConversationRequest {
+  title?: string;
+}
+
+/** What GET /conversations/:id returns — the header plus the full transcript. */
+export interface ConversationDetail {
+  conversation: ConversationRecord;
+  queries: QueryRecord[];
+}
+
 export interface CreateQueryRequest {
+  conversationId: string;
   query: string;
   model: QueryModel;
   connectors: string[];

@@ -49,7 +49,7 @@ export const env = {
     // Gemini key must still be able to run ingestion. The provider validates
     // this lazily, on first use.
     apiKey: process.env.LLM_API_KEY ?? '',
-    model: process.env.LLM_MODEL ?? 'gemini-2.0-flash',
+    model: process.env.LLM_MODEL ?? 'gemini-3.6-flash',
     maxOutputTokens: process.env.LLM_MAX_OUTPUT_TOKENS
       ? Number(process.env.LLM_MAX_OUTPUT_TOKENS)
       : 2048,

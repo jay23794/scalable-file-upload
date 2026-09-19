@@ -3,9 +3,12 @@ import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import {
   ApiEnvelope,
+  ConversationDetail,
+  ConversationRecord,
   CreateQueryRequest,
   CreateQueryResponse,
   QueryRecord,
+  StartConversationRequest,
   StreamEvent,
   UploadSummary,
 } from './query-process.types';
@@ -22,8 +25,21 @@ export class QueryProcessService {
     return this.http.post<ApiEnvelope<CreateQueryResponse>>(`${API_BASE}/queries`, body);
   }
 
-  list(): Observable<ApiEnvelope<QueryRecord[]>> {
-    return this.http.get<ApiEnvelope<QueryRecord[]>>(`${API_BASE}/queries`);
+  /** 201 — a conversation fully exists once this returns; no background work. */
+  startConversation(
+    body: StartConversationRequest = {},
+  ): Observable<ApiEnvelope<ConversationRecord>> {
+    return this.http.post<ApiEnvelope<ConversationRecord>>(`${API_BASE}/conversations`, body);
+  }
+
+  /** Newest first, by updatedAt — the sidebar renders them in this order. */
+  listConversations(): Observable<ApiEnvelope<ConversationRecord[]>> {
+    return this.http.get<ApiEnvelope<ConversationRecord[]>>(`${API_BASE}/conversations`);
+  }
+
+  /** The header plus the whole transcript, oldest turn first. */
+  getConversation(id: string): Observable<ApiEnvelope<ConversationDetail>> {
+    return this.http.get<ApiEnvelope<ConversationDetail>>(`${API_BASE}/conversations/${id}`);
   }
 
   getById(id: string): Observable<ApiEnvelope<QueryRecord>> {

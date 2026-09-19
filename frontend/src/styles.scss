@@ -4,27 +4,68 @@
 // Learn more about theming and how to use it for your application's
 // custom components at https://material.angular.dev/guide/theming
 @use '@angular/material' as mat;
+@use './theme-colors' as theme;
+
+// ---------------------------------------------------------------------------
+// Palette — "Ocean Blue Serenity"
+//
+// The tonal ramps in _theme-colors.scss are GENERATED, not hand-written: M3
+// needs a full 0–100 tone scale per role, and those tones are computed in HCT
+// colour space, so editing hexes there by hand produces an inconsistent theme.
+//
+// To switch the app to a different palette, re-run the generator with new seed
+// colours and everything below follows automatically:
+//
+//   ng generate @angular/material:m3-theme \
+//     --primary-color="#0077b6" --secondary-color="#0096c7" \
+//     --tertiary-color="#48cae4" --interactive=false --defaults --force
+//
+// (It writes src_theme-colors.scss next to src/; move it to src/_theme-colors.scss.)
+//
+// Seeds currently in use, from the Ocean Blue Serenity ramp:
+//   primary   #0077b6  Bright Teal Blue
+//   secondary #0096c7  Blue Green
+//   tertiary  #48cae4  Sky Aqua
+//
+// Deliberately NO --neutral-color. M3 neutrals carry the surfaces, and they are
+// meant to be near-grey with only a whisper of tint. Seeding them with a
+// saturated brand colour (#03045e was tried) pushes every surface to the same
+// high chroma, so background, cards and bubbles flatten into one navy mass with
+// no hierarchy. Derived from primary they come out as cool near-blacks
+// (#101418) that let the ocean blues actually read.
+//
+// Error stays on the M3 default red: a failed generation has to read as an
+// error, and an on-palette blue would not.
+// ---------------------------------------------------------------------------
 
 html {
   height: 100%;
   @include mat.theme(
     (
       color: (
-        primary: mat.$azure-palette,
-        tertiary: mat.$blue-palette,
+        primary: theme.$primary-palette,
+        tertiary: theme.$tertiary-palette,
       ),
       typography: Roboto,
       density: 0,
     )
   );
+
+  // mat.theme() emits every colour as light-dark(), so the whole theme — both
+  // Material's internals and our own --mat-sys-* consumers — pivots on this one
+  // property. No attribute means "follow the OS".
+  color-scheme: light dark;
+
+  &[data-theme='light'] {
+    color-scheme: light;
+  }
+
+  &[data-theme='dark'] {
+    color-scheme: dark;
+  }
 }
 
 body {
-  // Default the application to a light color theme. This can be changed to
-  // `dark` to enable the dark color theme, or to `light dark` to defer to the
-  // user's system settings.
-  color-scheme: light;
-
   // Set a default background, font and text colors for the application using
   // Angular Material's system-level CSS variables. Learn more about these
   // variables at https://material.angular.dev/guide/system-variables
@@ -52,4 +93,169 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+}
+
+// Typography for assistant answers rendered from markdown.
+//
+// Global, not in query-process.scss, for the same reason as .doc-menu above:
+// this HTML is injected with [innerHTML], so Angular never stamps it with the
+// component's _ngcontent attribute and component-scoped rules cannot match it.
+.markdown {
+  // Bubbles are tight. Collapse the outer margins so the text starts and ends
+  // flush with the padding instead of floating in it.
+  > :first-child {
+    margin-top: 0;
+  }
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+
+  p {
+    margin: 0 0 8px;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    margin: 12px 0 6px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  // An answer is not a page, so its headings should read as emphasis rather
+  // than competing with the app's own hierarchy.
+  h1 { font-size: 1.25em; }
+  h2 { font-size: 1.15em; }
+  h3 { font-size: 1.05em; }
+  h4,
+  h5,
+  h6 { font-size: 1em; }
+
+  ul,
+  ol {
+    margin: 0 0 8px;
+    padding-left: 20px;
+  }
+
+  li {
+    margin: 2px 0;
+  }
+
+  // Nested lists should not add their own vertical gap on top of the parent's.
+  li > ul,
+  li > ol {
+    margin-bottom: 0;
+  }
+
+  a {
+    color: var(--mat-sys-primary);
+    text-decoration: underline;
+  }
+
+  code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--mat-sys-surface-container-highest);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+  }
+
+  pre {
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--mat-sys-surface-container-highest);
+    // Long lines scroll inside the block rather than widening the bubble.
+    overflow-x: auto;
+
+    code {
+      padding: 0;
+      background: none;
+    }
+  }
+
+  blockquote {
+    margin: 0 0 8px;
+    padding-left: 10px;
+    border-left: 3px solid var(--mat-sys-outline-variant);
+    color: var(--mat-sys-on-surface-variant);
+  }
+
+  table {
+    display: block;
+    margin: 0 0 8px;
+    border-collapse: collapse;
+    // Same reason as pre: a wide table must not stretch the transcript.
+    overflow-x: auto;
+    max-width: 100%;
+    font-size: 0.95em;
+  }
+
+  th,
+  td {
+    padding: 4px 10px;
+    border: 1px solid var(--mat-sys-outline-variant);
+    text-align: left;
+  }
+
+  th {
+    background: var(--mat-sys-surface-container-high);
+    font-weight: 600;
+  }
+
+  hr {
+    margin: 12px 0;
+    border: 0;
+    border-top: 1px solid var(--mat-sys-outline-variant);
+  }
+
+  img {
+    max-width: 100%;
+  }
+}
+
+// The streaming caret. It hangs off the last rendered block rather than a
+// template span, because the text it must follow is injected HTML — so this
+// rule has to be global too.
+.bubble.streaming .markdown > :last-child::after,
+.bubble.streaming .markdown:empty::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  opacity: 0.75;
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.streaming .markdown > :last-child::after,
+  .bubble.streaming .markdown:empty::after {
+    animation: none;
+  }
+}
+
+// The appearance menu's selected-state tick.
+//
+// Global for the same reason as .doc-menu: the panel renders in an overlay,
+// outside the app component, so app.scss cannot reach it. `order` is doing the
+// real work — mat-menu-item hoists the label into its own span placed AFTER any
+// projected icons, so without it the tick lands between icon and label.
+.mat-mdc-menu-item .theme-check {
+  order: 1;
+  margin-left: auto;
+  margin-right: 0;
+  opacity: 0.9;
 }

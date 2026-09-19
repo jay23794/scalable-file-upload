@@ -5,29 +5,37 @@
     mode="side"
     [opened]="sidenavOpen()"
   >
-    <mat-toolbar color="primary" class="sidenav-header">
+    <div class="rail-brand">
       <mat-icon>dashboard</mat-icon>
-    </mat-toolbar>
+    </div>
 
-    <mat-nav-list>
+    <!-- An icon rail rather than a labelled list: the chat page already owns a
+         sidebar of its own, and two columns of text read as one confused nav.
+         Names move into tooltips, which is also why each link needs its own
+         aria-label — an icon alone is nothing to a screen reader. -->
+    <nav class="rail">
       <a
-        mat-list-item
+        class="rail-item"
         routerLink="/file-upload"
         routerLinkActive="active-link"
+        matTooltip="File Upload"
+        matTooltipPosition="right"
+        aria-label="File Upload"
       >
-        <mat-icon matListItemIcon>cloud_upload</mat-icon>
-        <span matListItemTitle>File Upload</span>
+        <mat-icon>cloud_upload</mat-icon>
       </a>
 
       <a
-        mat-list-item
+        class="rail-item"
         routerLink="/query-process"
         routerLinkActive="active-link"
+        matTooltip="Real-time Chat"
+        matTooltipPosition="right"
+        aria-label="Real-time Chat"
       >
-        <mat-icon matListItemIcon>chat</mat-icon>
-        <span matListItemTitle>Real-time Chat</span>
+        <mat-icon>chat</mat-icon>
       </a>
-    </mat-nav-list>
+    </nav>
   </mat-sidenav>
 
   <mat-sidenav-content>
@@ -35,6 +43,29 @@
       <button mat-icon-button (click)="toggleSidenav()" aria-label="Toggle navigation">
         <mat-icon>menu</mat-icon>
       </button>
+
+      <span class="toolbar-spacer"></span>
+
+      <button
+        mat-icon-button
+        [matMenuTriggerFor]="themeMenu"
+        matTooltip="Appearance"
+        aria-label="Appearance"
+      >
+        <mat-icon>{{ themeIcon() }}</mat-icon>
+      </button>
+
+      <mat-menu #themeMenu="matMenu">
+        @for (option of themeOptions; track option.value) {
+          <button type="button" mat-menu-item (click)="setTheme(option.value)">
+            <mat-icon>{{ option.icon }}</mat-icon>
+            <span>{{ option.label }}</span>
+            @if (themePreference() === option.value) {
+              <mat-icon class="theme-check">check</mat-icon>
+            }
+          </button>
+        }
+      </mat-menu>
     </mat-toolbar>
 
     <main class="app-content">
