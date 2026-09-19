@@ -1,8 +1,8 @@
-import { ConversationRepository } from '../features/real-time-query-process/conversation.repository';
+import { ConversationRepository } from '../features/real-time-query-process/repository/conversation.repository';
 import { FileUploadOcrRepository } from '../features/file-upload-ocr/file-upload-ocr.repository';
 import { FileUploadOcrService } from '../features/file-upload-ocr/file-upload-ocr.service';
 import { InternalService } from '../features/internal/internal.service';
-import { RealTimeQueryProcessRepository } from '../features/real-time-query-process/real-time-query-process.repository';
+import { RealTimeQueryProcessRepository } from '../features/real-time-query-process/repository/real-time-query-process.repository';
 import { RealTimeQueryProcessService } from '../features/real-time-query-process/real-time-query-process.service';
 import { SupabaseStorageService } from './storage';
 import { ocrQueue } from './queue';

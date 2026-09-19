@@ -1,5 +1,5 @@
 import { Schema, model } from 'mongoose';
-import { FinishReason, QueryModel, QueryRecord, QueryStatus, SourceRef } from './types';
+import { ConversationRecord, FinishReason, QueryModel, QueryRecord, QueryStatus, SourceRef } from './types';
 
 const QUERY_STATUSES: QueryStatus[] = ['generating', 'complete', 'failed'];
 const QUERY_MODELS: QueryModel[] = ['gemini', 'gpt-4o', 'claude'];
@@ -69,4 +69,32 @@ export const toRecord = (doc: QueryDoc): QueryRecord => ({
   totalTokens: doc.totalTokens,
   finishReason: doc.finishReason,
   failedReason: doc.failedReason,
+});
+
+// ---------------------------------------------------------------------------
+// Conversation — the container a query row is filed under via conversationId.
+// ---------------------------------------------------------------------------
+
+export interface ConversationDoc extends Omit<ConversationRecord, 'id'> {
+  _id: string;
+}
+
+const ConversationSchema = new Schema<ConversationDoc>(
+  {
+    _id: { type: String, required: true },
+    title: { type: String, required: true },
+  },
+  { _id: false, versionKey: false, timestamps: true },
+);
+
+// Backs the conversation list — newest first.
+ConversationSchema.index({ updatedAt: -1 });
+
+export const ConversationModelDoc = model<ConversationDoc>('Conversation', ConversationSchema);
+
+export const toConversationRecord = (doc: ConversationDoc): ConversationRecord => ({
+  id: doc._id,
+  title: doc.title,
+  createdAt: doc.createdAt,
+  updatedAt: doc.updatedAt,
 });

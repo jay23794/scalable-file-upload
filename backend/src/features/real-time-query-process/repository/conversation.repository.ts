@@ -1,5 +1,5 @@
-import { ConversationModelDoc, toConversationRecord } from './conversation.model';
-import { ConversationRecord, NewConversationRecord } from './types';
+import { ConversationModelDoc, toConversationRecord } from '../real-time-query-process.model';
+import { ConversationRecord, NewConversationRecord } from '../types';
 
 export class ConversationRepository {
   async create(record: NewConversationRecord): Promise<ConversationRecord> {

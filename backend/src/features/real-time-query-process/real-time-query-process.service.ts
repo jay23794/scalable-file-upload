@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
 import { Queue } from 'bullmq';
 import { env } from '../../config/env';
-import { RealTimeQueryProcessRepository } from './real-time-query-process.repository';
+import { RealTimeQueryProcessRepository } from './repository/real-time-query-process.repository';
 import { CreateQueryInput } from './real-time-query-process.schema';
 import { GenerateJobData } from '../../infra/generateQueue';
-import { ConversationRepository } from './conversation.repository';
+import { ConversationRepository } from './repository/conversation.repository';
 import { StartConversationInput } from './real-time-query-process.schema';
 import {
   ConversationNotFoundError,

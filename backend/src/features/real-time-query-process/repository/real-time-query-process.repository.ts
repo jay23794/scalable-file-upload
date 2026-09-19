@@ -1,5 +1,5 @@
-import { GenerationResult, NewQueryRecord, QueryRecord } from './types';
-import { QueryModelDoc, toRecord } from './real-time-query-process.model';
+import { GenerationResult, NewQueryRecord, QueryRecord } from '../types';
+import { QueryModelDoc, toRecord } from '../real-time-query-process.model';
 
 export class RealTimeQueryProcessRepository {
   async create(record: NewQueryRecord): Promise<QueryRecord> {
