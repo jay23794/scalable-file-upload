@@ -3,6 +3,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import fileUploadOcrRoutes from './features/file-upload-ocr/file-upload-ocr.routes';
 import realTimeQueryProcessRoutes from './features/real-time-query-process/real-time-query-process.routes';
+import findJobRoutes from './features/find-job/find-job.routes';
 import internalRoutes from './features/internal/internal.routes';
 import { startSweeper } from './features/file-upload-ocr/file-upload-ocr.sweeper';
 import { startQueueEvents } from './infra/queueEvents';
@@ -22,6 +23,7 @@ app.get('/health', (_req: Request, res: Response) => {
 
 app.use('/api/v1/file-upload-ocr', fileUploadOcrRoutes);
 app.use('/api/v1/real-time-query-process', realTimeQueryProcessRoutes);
+app.use('/api/v1/find-job', findJobRoutes);
 app.use('/internal', internalRoutes);
 
 const httpServer = createServer(app);
