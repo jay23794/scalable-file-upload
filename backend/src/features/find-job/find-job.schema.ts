@@ -8,7 +8,7 @@ import { env } from '../../config/env';
  */
 
 /** The sites that exist are the keys of the actor map: adding a board is a
- *  config change. Read at module load, same as every other env-derived value. */
+ *  config change, not a code change. */
 const knownSites = Object.keys(env.findJob.actors);
 
 export const CreateRunSchema = z.object({
@@ -58,14 +58,3 @@ export const CreateRunSchema = z.object({
   jobType: z.string().trim().min(1).optional(),
 });
 export type CreateRunInput = z.infer<typeof CreateRunSchema>;
-
-export const ListJobsQuerySchema = z.object({
-  site: z.string().trim().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional(),
-  cursor: z.string().trim().min(1).optional(),
-  // Off by default: one posting's raw object is 3-20 KB.
-  includeRaw: z
-    .enum(['true', 'false'])
-    .optional()
-    .transform((value) => value === 'true'),
-});

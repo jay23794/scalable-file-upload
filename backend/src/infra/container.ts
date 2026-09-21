@@ -2,7 +2,6 @@ import { ConversationRepository } from '../features/real-time-query-process/repo
 import { FileUploadOcrRepository } from '../features/file-upload-ocr/file-upload-ocr.repository';
 import { FindJobRepository } from '../features/find-job/repository/find-job.repository';
 import { FindJobService } from '../features/find-job/find-job.service';
-import { RawJobRepository } from '../features/find-job/repository/raw-job.repository';
 import { FileUploadOcrService } from '../features/file-upload-ocr/file-upload-ocr.service';
 import { InternalService } from '../features/internal/internal.service';
 import { RealTimeQueryProcessRepository } from '../features/real-time-query-process/repository/real-time-query-process.repository';
@@ -17,7 +16,6 @@ const _fileUploadOcrRepository = new FileUploadOcrRepository();
 const _realTimeQueryProcessRepository = new RealTimeQueryProcessRepository();
 const _conversationRepository = new ConversationRepository();
 const _findJobRepository = new FindJobRepository();
-const _rawJobRepository = new RawJobRepository();
 const _storage = new SupabaseStorageService();
 
 export const fileUploadOcrService = new FileUploadOcrService(
@@ -33,10 +31,6 @@ export const realTimeQueryProcessService = new RealTimeQueryProcessService(
   generateQueue,
 );
 
-export const findJobService = new FindJobService(
-  _findJobRepository,
-  _rawJobRepository,
-  scrapeQueue,
-);
+export const findJobService = new FindJobService(_findJobRepository, scrapeQueue);
 
 export const internalService = new InternalService(_storage);
