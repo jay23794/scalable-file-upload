@@ -3,35 +3,74 @@ import { Job, Worker } from 'bullmq';
 import { env } from '../../config/env';
 import { redisConnection } from '../../infra/queue';
 import { ScrapeJobData } from '../../infra/scrapeQueue';
+import { resolveProvider } from './providers';
+import { JobSearchQuery, ProviderRunState, ScrapeProvider } from './providers/types';
 
-/**
- * Consumes `scrape-queue`: one job per run and site.
- *
- * Unlike every other queue in this project, these jobs do not compute -- they
- * start work on Apify and WAIT for it, for minutes. That shapes the settings
- * below, and it is why concurrency here is about waiting rather than CPU.
- */
+/** Consumes `scrape-queue`: one job per run and site. These jobs do not
+ *  compute -- they start work on Apify and wait for it, for minutes. */
 
 let worker: Worker<ScrapeJobData> | undefined;
 
-/**
- * STEP 1: prove the queue -> worker link.
- *
- * Reads the job and logs it. Nothing else yet -- no Apify call, no Mongo
- * write, so the run document is left untouched and no money can be spent.
- * Steps 2-5 fill this in: resume check, start, poll, collect, ingest.
- */
-async function handleScrapeJob(job: Job<ScrapeJobData>): Promise<void> {
-  const { runId, site, searchTerms, resultsWanted } = job.data;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const log = (msg: string) => console.log(`[scrape-worker] ${msg}`);
 
-  console.log(
-    `[scrape-worker] picked up job ${job.id} ` +
-      `(attempt ${job.attemptsMade + 1}/${job.opts.attempts ?? 1})`,
-  );
-  console.log(
-    `[scrape-worker]   run=${runId} site=${site} ` +
-      `terms=${JSON.stringify(searchTerms)} cap=${resultsWanted}`,
-  );
+function queryFrom(data: ScrapeJobData): JobSearchQuery {
+  return {
+    searchTerms: data.searchTerms,
+    location: data.location,
+    isRemote: data.isRemote,
+    resultsWanted: data.resultsWanted,
+    hoursOld: data.hoursOld,
+    jobType: data.jobType,
+  };
+}
+
+/**
+ * Poll until the run finishes, or OUR deadline expires.
+ *
+ * BullMQ v5 has no per-job timeout, so the loop carries its own. The deadline
+ * sits above the actor's own timeout, so Apify gives up first and we get a
+ * real error instead of abandoning a run we paid for.
+ */
+async function pollUntilDone(
+  provider: ScrapeProvider,
+  apifyRunId: string,
+): Promise<ProviderRunState> {
+  const deadline = Date.now() + env.findJob.pollDeadlineMs;
+
+  while (Date.now() < deadline) {
+    const state = await provider.check(apifyRunId);
+    if (state.state !== 'running') return state;
+    log(`  still running, checking again in ${env.findJob.pollIntervalMs}ms`);
+    await sleep(env.findJob.pollIntervalMs);
+  }
+
+  throw new Error(`Poll deadline exceeded for ${apifyRunId}`);
+}
+
+async function handleScrapeJob(job: Job<ScrapeJobData>): Promise<void> {
+  const { runId, site } = job.data;
+  log(`job ${job.id} run=${runId} site=${site}`);
+
+  // Turns the site string off the queue into the code that scrapes it.
+  const provider = resolveProvider(site);
+
+  // 1. START -- returns as soon as Apify accepts it. The billable call.
+  const handle = await provider.start(site, queryFrom(job.data));
+  log(`  started Apify run ${handle.apifyRunId} (dataset ${handle.datasetId})`);
+
+  // 2. POLL -- for minutes.
+  const state = await pollUntilDone(provider, handle.apifyRunId);
+  if (state.state === 'failed') {
+    throw new Error(`Apify run failed: ${state.error?.code} ${state.error?.message}`);
+  }
+
+  // 3. COLLECT
+  const batch = await provider.collect(site, handle);
+  log(`  collected ${batch.rows.length} rows (cost=${state.costUsd ?? 'n/a'})`);
+
+  // TODO next step: hand these to the service to store in Mongo.
+  console.dir(batch.rows.slice(0, 2), { depth: 4 });
 }
 
 export function startScrapeWorker(): Worker<ScrapeJobData> {
@@ -40,41 +79,24 @@ export function startScrapeWorker(): Worker<ScrapeJobData> {
   worker = new Worker<ScrapeJobData>(env.findJob.queueName, handleScrapeJob, {
     connection: redisConnection,
     concurrency: env.findJob.workerConcurrency,
+    // Started only after Mongo connects.
     autorun: false,
   });
 
-  worker.on('completed', (job) => {
-    console.log(`[scrape-worker] completed ${job.id}`);
-  });
+  worker.on('completed', (job) => log(`completed ${job.id}`));
+  worker.on('failed', (job, err) => console.error(`[scrape-worker] failed ${job?.id}: ${err.message}`));
 
-  worker.on('failed', (job, err) => {
-    console.error(`[scrape-worker] failed ${job?.id}: ${err.message}`);
-  });
+  void worker.run().catch((err) => console.error('[scrape-worker] stopped unexpectedly:', err));
 
-  // `run()` resolves only when the worker closes, so it is deliberately not
-  // awaited here.
-  void worker.run().catch((err) => {
-    console.error('[scrape-worker] stopped unexpectedly:', err);
-  });
-
-  console.log(
-    `[scrape-worker] listening on "${env.findJob.queueName}" ` +
-      `concurrency=${env.findJob.workerConcurrency}`,
-  );
+  log(`listening on "${env.findJob.queueName}" concurrency=${env.findJob.workerConcurrency}`);
   return worker;
 }
 
-/**
- * Drain and stop.
- *
- * `close()` lets jobs that are already running finish. Killing a polling job
- * without draining would leave an Apify run nobody ever collects -- work we
- * paid for and then abandoned.
- */
+/** `close()` lets running jobs finish rather than abandoning an Apify run. */
 export async function stopScrapeWorker(): Promise<void> {
   if (!worker) return;
-  console.log('[scrape-worker] draining...');
+  log('draining...');
   await worker.close();
   worker = undefined;
-  console.log('[scrape-worker] stopped');
+  log('stopped');
 }

@@ -14,6 +14,7 @@ export const apifyClient = new ApifyClient(env.findJob.apifyToken);
 
 const providers: ScrapeProvider[] = [new LinkedInApifyAdapter(apifyClient)];
 
+
 export class NoProviderForSiteError extends Error {
   constructor(site: JobSite) {
     super(
