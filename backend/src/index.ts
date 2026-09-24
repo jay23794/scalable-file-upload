@@ -6,6 +6,7 @@ import realTimeQueryProcessRoutes from './features/real-time-query-process/real-
 import findJobRoutes from './features/find-job/find-job.routes';
 import internalRoutes from './features/internal/internal.routes';
 import { startSweeper } from './features/file-upload-ocr/file-upload-ocr.sweeper';
+import { startScrapeWorker, stopScrapeWorker } from './features/find-job/find-job.worker';
 import { startQueueEvents } from './infra/queueEvents';
 import { initIo } from './infra/io';
 import { fileUploadOcrService } from './infra/container';
@@ -49,6 +50,7 @@ async function start() {
     console.log(`Backend listening on http://localhost:${PORT}`);
     startQueueEvents();
     startSweeper(fileUploadOcrService);
+    startScrapeWorker();
   });
 }
 
@@ -60,6 +62,8 @@ start().catch((err) => {
 const shutdown = async (signal: NodeJS.Signals) => {
   console.log(`[backend] ${signal} received, shutting down...`);
   httpServer.close();
+  // Before disconnectMongo(): a draining job still needs the database.
+  await stopScrapeWorker();
   await disconnectMongo();
   process.exit(0);
 };

@@ -5,6 +5,16 @@ export type JobSite = string;
 export type RunStatus = 'scraping' | 'ready' | 'partial' | 'failed';
 export type SiteStatus = 'pending' | 'running' | 'done' | 'failed';
 
+/**
+ * A failure, normalised so the worker can decide whether to retry without
+ * knowing anything about the actor that produced it.
+ */
+export interface SiteError {
+  code: string;
+  message: string;
+  retriable: boolean;
+}
+
 /** One site's progress within a run. Created `pending`: nothing started yet. */
 export interface SiteEntry {
   site: JobSite;

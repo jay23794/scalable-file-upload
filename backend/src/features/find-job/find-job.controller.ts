@@ -12,8 +12,6 @@ export const createRun = async (req: Request, res: Response) => {
 
   try {
     const result = await findJobService.createRun(parsed.data);
-    // 202, not 201: nothing the client asked for exists yet. siteCount tells
-    // the caller how many things to wait on.
     return res.status(202).json(successResponse(result, 'Scrape run accepted'));
   } catch (err) {
     return res.status(500).json({ success: false, error: (err as Error).message });

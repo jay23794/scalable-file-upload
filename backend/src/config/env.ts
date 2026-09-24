@@ -55,6 +55,17 @@ const jsonMap = (key: string, fallback: Record<string, string>): Record<string, 
 };
 
 const apifyActors = jsonMap('APIFY_ACTORS', {});
+const apifyRunTimeoutMs = num('APIFY_RUN_TIMEOUT_MS', 600_000);
+const findJobPollDeadlineMs = num('FINDJOB_POLL_DEADLINE_MS', 900_000);
+
+// Our poll loop must outlive the actor's own timeout, so Apify gives up first
+// and hands us a real error instead of us abandoning a run we paid for.
+if (findJobPollDeadlineMs <= apifyRunTimeoutMs) {
+  throw new Error(
+    `FINDJOB_POLL_DEADLINE_MS (${findJobPollDeadlineMs}) must exceed ` +
+      `APIFY_RUN_TIMEOUT_MS (${apifyRunTimeoutMs})`,
+  );
+}
 const findJobResultsPerSite = num('FINDJOB_RESULTS_PER_SITE', 50);
 const findJobMaxResultsPerSite = num('FINDJOB_MAX_RESULTS_PER_SITE', 100);
 
@@ -102,6 +113,14 @@ export const env = {
   },
   findJob: {
     queueName: process.env.SCRAPE_QUEUE_NAME ?? 'scrape-queue',
+    // Not required at boot: the rest of the backend runs without Apify. The
+    // client raises a clear error if asked to make a call without one.
+    apifyToken: process.env.APIFY_TOKEN ?? '',
+    pollIntervalMs: num('APIFY_POLL_INTERVAL_MS', 10_000),
+    runTimeoutMs: apifyRunTimeoutMs,
+    pollDeadlineMs: findJobPollDeadlineMs,
+    // Cost guard, enforced by Apify itself -- invariant 4.
+    maxItemsPerRun: num('APIFY_MAX_ITEMS_PER_RUN', 100),
     // Site -> actor id. The keys are the set of sites that exist, so adding a
     // board is a config change. Empty until actors are chosen.
     actors: apifyActors,
@@ -111,6 +130,9 @@ export const env = {
     resultsPerSite: findJobResultsPerSite,
     maxResultsPerSite: findJobMaxResultsPerSite,
     hoursOld: num('FINDJOB_HOURS_OLD', 168),
+    // These jobs wait on Apify rather than compute, so keep this at or above
+    // the number of sites or they run one after another for no reason.
+    workerConcurrency: num('FINDJOB_WORKER_CONCURRENCY', 4),
   },
   internalServiceToken: required('INTERNAL_SERVICE_TOKEN', process.env.INTERNAL_SERVICE_TOKEN),
 };
